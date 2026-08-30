@@ -1,0 +1,198 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum PurchaseStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum TxType {
+  PURCHASE
+  USAGE
+  REFUND
+  ADMIN_ADJUSTMENT
+  PROMOTIONAL
+  REVERSAL
+}
+
+enum UsageWindowStatus {
+  ACTIVE
+  EXPIRED
+}
+
+enum TimeSessionStatus {
+  ACTIVE
+  ENDED
+}
+
+enum ProductKind {
+  DAY_PACK   // whole VPN Days — flat charge per 24h window, reconnects inside it are free
+  TIME_PACK  // short passes (30 min / 1h / 3h / 6h / 12h) — metered minute-by-minute while connected
+}
+
+enum WalletUnit {
+  DAY
+  MINUTE
+}
+
+enum DeviceStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum NodeStatus {
+  HEALTHY
+  DEGRADED
+  DRAINING
+  OFFLINE
+}
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  emailVerified Boolean   @default(false)
+  status        String    @default("ACTIVE") // ACTIVE | SUSPENDED
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  wallet    Wallet?
+  purchases Purchase[]
+  devices   Device[]
+  usageWindows UsageWindow[]
+  timeSessions TimeSession[]
+}
+
+model Wallet {
+  id            String   @id @default(uuid())
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id])
+  balance       Int      @default(0) // whole VPN Days, never fractional
+  minuteBalance Int      @default(0) // metered minutes, for short time passes (30m/1h/3h/6h/12h)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  transactions WalletTransaction[]
+}
+
+// Immutable ledger. Never update a row — every balance change is a new row.
+model WalletTransaction {
+  id            String   @id @default(uuid())
+  walletId      String
+  wallet        Wallet   @relation(fields: [walletId], references: [id])
+  type          TxType
+  unit          WalletUnit @default(DAY) // which wallet balance this row affects — DAY or MINUTE
+  amount        Int // signed: +N credit, -N debit (days if unit=DAY, minutes if unit=MINUTE)
+  balanceBefore Int
+  balanceAfter  Int
+  referenceType String? // "purchase" | "usage_window" | "time_session" | "admin" | ...
+  referenceId   String?
+  idempotencyKey String? @unique // enforces exactly-once for webhooks/usage events
+  metadata      Json?
+  createdAt     DateTime @default(now())
+
+  @@index([walletId, createdAt])
+}
+
+model Product {
+  id              String      @id @default(uuid())
+  name            String
+  kind            ProductKind @default(DAY_PACK)
+  vpnDays         Int?        // set when kind = DAY_PACK
+  durationMinutes Int?        // set when kind = TIME_PACK (30, 60, 180, 360, 720, ...)
+  priceCents      Int
+  currency        String      @default("usd")
+  stripePriceId   String?
+  active          Boolean     @default(true)
+
+  purchases Purchase[]
+}
+
+model Purchase {
+  id                String         @id @default(uuid())
+  userId            String
+  user              User           @relation(fields: [userId], references: [id])
+  productId         String
+  product           Product        @relation(fields: [productId], references: [id])
+  stripeSessionId   String?        @unique
+  stripePaymentIntentId String?    @unique
+  amountCents       Int
+  status            PurchaseStatus @default(PENDING)
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+}
+
+model Region {
+  id        String  @id @default(uuid())
+  code      String  @unique // "us", "eu", "asia"
+  name      String
+  country   String
+  city      String
+  active    Boolean @default(true)
+  sortOrder Int     @default(0)
+
+  nodes VPNNode[]
+}
+
+model VPNNode {
+  id        String     @id @default(uuid())
+  regionId  String
+  region    Region     @relation(fields: [regionId], references: [id])
+  hostname  String
+  publicIp  String
+  publicKey String
+  status    NodeStatus @default(HEALTHY)
+  capacity  Int        @default(200) // max peers
+  currentPeers Int     @default(0)
+  createdAt DateTime   @default(now())
+}
+
+model Device {
+  id              String       @id @default(uuid())
+  userId          String
+  user            User         @relation(fields: [userId], references: [id])
+  name            String
+  publicKey       String       @unique
+  status          DeviceStatus @default(ACTIVE)
+  lastConnectedAt DateTime?
+  createdAt       DateTime     @default(now())
+}
+
+model UsageWindow {
+  id                  String            @id @default(uuid())
+  userId              String
+  user                User              @relation(fields: [userId], references: [id])
+  startsAt            DateTime          @default(now())
+  endsAt              DateTime
+  walletTransactionId String            @unique
+  status              UsageWindowStatus @default(ACTIVE)
+  bytesUsed            BigInt           @default(0)
+
+  @@index([userId, status])
+}
+
+// Metered time-pack session (30m/1h/3h/6h/12h passes). Unlike UsageWindow
+// (flat charge per fixed 24h window), this drains the wallet's minuteBalance
+// minute-by-minute only while ACTIVE. Disconnecting ends/pauses it; the
+// partial unique index in migrations_manual/002 enforces one ACTIVE session
+// per user at the DB level, same pattern as one_active_window_per_user.
+model TimeSession {
+  id            String            @id @default(uuid())
+  userId        String
+  user          User              @relation(fields: [userId], references: [id])
+  startsAt      DateTime          @default(now())
+  lastBilledAt  DateTime          @default(now())
+  endedAt       DateTime?
+  status        TimeSessionStatus @default(ACTIVE)
+  minutesBilled Int               @default(0) // running total charged this session
+  bytesUsed     BigInt            @default(0)
+
+  @@index([userId, status])
+}
