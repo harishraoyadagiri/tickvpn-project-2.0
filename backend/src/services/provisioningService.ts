@@ -2,39 +2,64 @@ import { PrismaClient } from "@prisma/client";
 
 /**
  * VPNNodeAdapter is the seam between the app and real infrastructure.
- * MockNodeAdapter lets the whole product work end-to-end today.
- * Swap in a RealNodeAdapter (SSH/API into your DO droplets, wg genkey,
- * `wg set` peer commands, nftables rules) without touching any route or
- * the wallet/usage engine at all.
+ * Toggle between them with USE_REAL_NODES in .env — no other code changes.
  */
 export interface VPNNodeAdapter {
-  registerPeer(node: { hostname: string; publicIp: string }, devicePublicKey: string): Promise<{
-    internalIp: string; // e.g. "10.66.0.4/32"
-  }>;
+  registerPeer(
+    node: { hostname: string; publicIp: string },
+    devicePublicKey: string,
+    internalIp: string
+  ): Promise<void>;
   revokePeer(node: { hostname: string; publicIp: string }, devicePublicKey: string): Promise<void>;
   drainNode(node: { hostname: string }): Promise<void>;
 }
 
 export class MockNodeAdapter implements VPNNodeAdapter {
-  private nextOctet = 2;
-
-  async registerPeer(node: { hostname: string }, _devicePublicKey: string) {
-    const ip = `10.66.0.${this.nextOctet++}/32`;
-    console.log(`[mock] registered peer on ${node.hostname} -> ${ip}`);
-    return { internalIp: ip };
+  async registerPeer(node: { hostname: string }, devicePublicKey: string, internalIp: string) {
+    console.log(`[mock] registered ${devicePublicKey} on ${node.hostname} -> ${internalIp}`);
   }
-
   async revokePeer(node: { hostname: string }, devicePublicKey: string) {
     console.log(`[mock] revoked ${devicePublicKey} from ${node.hostname}`);
   }
-
   async drainNode(node: { hostname: string }) {
     console.log(`[mock] draining ${node.hostname}`);
   }
 }
 
-// Swap this line for a RealNodeAdapter when your DO nodes are live.
-const adapter: VPNNodeAdapter = new MockNodeAdapter();
+/**
+ * Talks to the small agent (agent.py) running on each real WireGuard node.
+ * Auth is a single shared secret (NODE_SHARED_SECRET) — fine for a handful
+ * of trusted nodes; revisit before this is anything bigger.
+ */
+export class RealNodeAdapter implements VPNNodeAdapter {
+  private secret = process.env.NODE_SHARED_SECRET || "";
+  private port = 8787;
+
+  async registerPeer(node: { publicIp: string }, devicePublicKey: string, internalIp: string) {
+    const res = await fetch(`http://${node.publicIp}:${this.port}/peers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Node-Secret": this.secret },
+      body: JSON.stringify({ publicKey: devicePublicKey, allowedIp: internalIp }),
+    });
+    if (!res.ok) throw new Error(`Node agent rejected peer registration (${res.status})`);
+  }
+
+  async revokePeer(node: { publicIp: string }, devicePublicKey: string) {
+    const res = await fetch(`http://${node.publicIp}:${this.port}/peers/remove`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Node-Secret": this.secret },
+      body: JSON.stringify({ publicKey: devicePublicKey }),
+    });
+    if (!res.ok) throw new Error(`Node agent rejected peer revocation (${res.status})`);
+  }
+
+  async drainNode(node: { hostname: string }) {
+    console.log(`[real] drain not implemented yet for ${node.hostname} — remove peers manually via Console if needed`);
+  }
+}
+
+const USE_REAL_NODES = process.env.USE_REAL_NODES === "true";
+const adapter: VPNNodeAdapter = USE_REAL_NODES ? new RealNodeAdapter() : new MockNodeAdapter();
 
 export async function selectHealthyNode(prisma: PrismaClient, regionCode: string) {
   const region = await prisma.region.findUnique({ where: { code: regionCode } });
@@ -57,7 +82,15 @@ export async function provisionDevice(
   const { userId, regionCode, devicePublicKey, deviceName } = params;
 
   const node = await selectHealthyNode(prisma, regionCode);
-  const { internalIp } = await adapter.registerPeer(node, devicePublicKey);
+
+  // IP allocation: offset by 10 so we never collide with .2–.9, which are
+  // reserved for manually created test peers (like the one made by hand
+  // during Sprint 1 validation). Global count is a known simplification —
+  // fine with one real node; scope this per-node once there's more than one.
+  const existingCount = await prisma.device.count({ where: { status: "ACTIVE" } });
+  const internalIp = `10.8.0.${10 + existingCount}/32`;
+
+  await adapter.registerPeer(node, devicePublicKey, internalIp);
 
   const device = await prisma.device.upsert({
     where: { publicKey: devicePublicKey },
@@ -76,8 +109,6 @@ export async function provisionDevice(
       serverPublicKey: node.publicKey,
       serverEndpoint: `${node.publicIp}:51820`,
       internalIp,
-      // Real private key generation should happen client-side per PRD section 7.
-      // This just returns everything the client needs to assemble the .conf/QR.
       dns: "1.1.1.1",
       allowedIps: "0.0.0.0/0, ::/0",
     },
@@ -88,8 +119,10 @@ export async function revokeDevice(prisma: PrismaClient, deviceId: string) {
   const device = await prisma.device.findUnique({ where: { id: deviceId } });
   if (!device) throw new Error("Device not found");
 
-  // In a real adapter we'd look up which node this device is peered with.
-  // MVP: revoke is authoritative in DB immediately; node sync is a fast-follow job.
+  // NOTE: this only revokes in the database today — it does not yet call
+  // the adapter to remove the peer from the real node (the schema doesn't
+  // track which node a device is on yet). Fine for a small trusted group;
+  // fix before this goes beyond that.
   await prisma.device.update({ where: { id: deviceId }, data: { status: "REVOKED" } });
   return device;
 }
