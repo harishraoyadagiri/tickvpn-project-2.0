@@ -6,12 +6,6 @@ dist/
 .DS_Store
 Thumbs.db
 
-# Accidental nested clone of this same repo (empty scaffold) — see chat.
-/tickvpn-project/
-
 # Runtime heartbeat file the dev server overwrites on every start/crash —
 # not real project content.
 backend/server-status.txt
-
-# Duplicate of docs/tickvpn-pricing-model.md left at the project root.
-/tickvpn-pricing-model.md
