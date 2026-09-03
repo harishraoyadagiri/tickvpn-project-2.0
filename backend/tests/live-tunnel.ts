@@ -69,6 +69,15 @@ function peersOnInterface(): string[] {
   ).rows[0];
   console.log(`  node ${node.hostname} -> 127.0.0.1:51820, server key ${SERVER_PUBKEY.slice(0, 16)}…`);
 
+  // Log in first: /dev/nodes/:id/token now requires a session (the token-mint
+  // route used to be reachable pre-auth, which was one of the review findings
+  // — see CLAUDE.md / dev.ts). Real usage is the same: an operator has to be
+  // logged in before minting a node credential.
+  await pg.query(`DELETE FROM "RateLimitHit"`); // the login rate limiter is real (5/hour per IP)
+  const email = `live+${Date.now()}@tickvpn.test`;
+  const login = await api("/auth/login", "POST", { email });
+  await api("/auth/verify", "POST", { token: login.json.devToken });
+
   const tok = await api(`/dev/nodes/${node.id}/token`, "POST");
   const agentToken: string = tok.json.agentToken;
   check(!!agentToken, "minted a per-node agent token", `${agentToken.slice(0, 12)}…`);
@@ -80,11 +89,6 @@ function peersOnInterface(): string[] {
 
   // ── 1. sign up and buy a day ──
   head("1  ACCOUNT WITH A DAY'S WORTH OF PASS");
-  // The login rate limiter is real (5/hour per IP); clear it for the harness.
-  await pg.query(`DELETE FROM "RateLimitHit"`);
-  const email = `live+${Date.now()}@tickvpn.test`;
-  const login = await api("/auth/login", "POST", { email });
-  await api("/auth/verify", "POST", { token: login.json.devToken });
   const credited = await api("/dev/credit-day", "POST", { days: 1 });
   check(credited.json.minuteBalance === 1440, "wallet holds one day = 1440 minutes",
         `daysRemaining=${credited.json.daysRemaining}`);
