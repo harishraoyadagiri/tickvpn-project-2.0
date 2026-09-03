@@ -15,21 +15,30 @@ export async function consume(
 ): Promise<{ allowed: boolean; used: number; retryAfterSeconds: number }> {
   const since = new Date(Date.now() - windowMs);
 
-  const used = await prisma.rateLimitHit.count({ where: { bucket, createdAt: { gte: since } } });
+  // count-then-insert is only a real limit if concurrent callers for the same
+  // bucket are serialized — otherwise two requests arriving at the limit
+  // boundary can both read "under limit" before either has written its hit,
+  // letting a burst exceed it. An advisory lock keyed on the bucket does that
+  // without a second storage system (D6 chose Postgres over Redis).
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${bucket})::bigint)`;
 
-  if (used >= limit) {
-    const oldest = await prisma.rateLimitHit.findFirst({
-      where: { bucket, createdAt: { gte: since } },
-      orderBy: { createdAt: "asc" },
-    });
-    const retryAfterSeconds = oldest
-      ? Math.max(1, Math.ceil((oldest.createdAt.getTime() + windowMs - Date.now()) / 1000))
-      : Math.ceil(windowMs / 1000);
-    return { allowed: false, used, retryAfterSeconds };
-  }
+    const used = await tx.rateLimitHit.count({ where: { bucket, createdAt: { gte: since } } });
 
-  await prisma.rateLimitHit.create({ data: { bucket } });
-  return { allowed: true, used: used + 1, retryAfterSeconds: 0 };
+    if (used >= limit) {
+      const oldest = await tx.rateLimitHit.findFirst({
+        where: { bucket, createdAt: { gte: since } },
+        orderBy: { createdAt: "asc" },
+      });
+      const retryAfterSeconds = oldest
+        ? Math.max(1, Math.ceil((oldest.createdAt.getTime() + windowMs - Date.now()) / 1000))
+        : Math.ceil(windowMs / 1000);
+      return { allowed: false, used, retryAfterSeconds };
+    }
+
+    await tx.rateLimitHit.create({ data: { bucket } });
+    return { allowed: true, used: used + 1, retryAfterSeconds: 0 };
+  });
 }
 
 /** Delete hits older than the longest window we use. Called by the scheduler. */

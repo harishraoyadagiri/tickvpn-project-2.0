@@ -2,7 +2,7 @@ import path from "path";
 import express from "express";
 import cookieParser from "cookie-parser";
 import { env, assertConfigValid, configSummary } from "./lib/env";
-import { prisma, disconnect } from "./lib/prisma";
+import { prisma, disconnect, assertLedgerImmutable } from "./lib/prisma";
 import { errorHandler } from "./lib/errors";
 import { checkoutRouter, webhookRouter } from "./routes/checkout";
 import { apiRouter } from "./routes/api";
@@ -42,25 +42,6 @@ app.use(express.static(path.join(__dirname, "..", "public")));
 // Must be last: turns a thrown error into a response instead of a hung socket.
 app.use(errorHandler);
 
-const server = app.listen(env.PORT, () => {
-  console.log(`TickVPN API listening on :${env.PORT}`);
-  console.table(configSummary());
-});
-
-const stopScheduler = startScheduler(prisma);
-
-async function shutdown(signal: string) {
-  console.log(`\n${signal} received, shutting down`);
-  stopScheduler();
-  server.close(() => {
-    disconnect().finally(() => process.exit(0));
-  });
-  setTimeout(() => process.exit(1), 10_000).unref();
-}
-
-process.on("SIGTERM", () => void shutdown("SIGTERM"));
-process.on("SIGINT", () => void shutdown("SIGINT"));
-
 // A process that has thrown an unhandled exception is in an undefined state.
 // The old code wrote a file and carried on, which is how a half-dead server
 // keeps accepting requests it cannot serve. Log it and let the supervisor
@@ -71,6 +52,38 @@ process.on("uncaughtException", (err) => {
 });
 process.on("unhandledRejection", (reason) => {
   console.error("[fatal] unhandled rejection:", reason);
+  process.exit(1);
+});
+
+let server: ReturnType<typeof app.listen>;
+
+async function main() {
+  // Checked here, not just documented in app_role.sql: a superuser DATABASE_URL
+  // means the "immutable" ledger is editable no matter what the code says.
+  await assertLedgerImmutable();
+
+  server = app.listen(env.PORT, () => {
+    console.log(`TickVPN API listening on :${env.PORT}`);
+    console.table(configSummary());
+  });
+
+  const stopScheduler = startScheduler(prisma);
+
+  async function shutdown(signal: string) {
+    console.log(`\n${signal} received, shutting down`);
+    stopScheduler();
+    server.close(() => {
+      disconnect().finally(() => process.exit(0));
+    });
+    setTimeout(() => process.exit(1), 10_000).unref();
+  }
+
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+}
+
+main().catch((err) => {
+  console.error("[fatal] failed to start:", err);
   process.exit(1);
 });
 

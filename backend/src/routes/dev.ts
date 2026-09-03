@@ -62,9 +62,16 @@ export function devRouter(prisma: PrismaClient) {
   /**
    * Mint a bearer token for a node. Printed once and never stored in plaintext.
    * In production this is an admin action with an audit event, not a dev route.
+   *
+   * Still behind `auth` even though the whole router is dev-gated: this mints
+   * a credential capable of controlling a node's peer set, and "reachable by
+   * anyone with a session" is a meaningfully smaller blast radius than
+   * "reachable by anyone who can route to :3001" if the dev-routes gate is
+   * ever misconfigured.
    */
   router.post(
     "/dev/nodes/:nodeId/token",
+    auth,
     asyncRoute(async (req, res) => {
       const node = await prisma.vPNNode.findUnique({ where: { id: req.params.nodeId } });
       if (!node) throw badRequest("node_not_found");

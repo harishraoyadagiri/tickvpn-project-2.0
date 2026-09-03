@@ -72,10 +72,24 @@ export async function provisionDevice(
   const node = await selectHealthyNode(prisma, regionCode);
 
   const device = await prisma.$transaction(async (tx) => {
+    // selectHealthyNode's capacity check ran outside this transaction, so two
+    // concurrent requests can both see the same node as "under capacity" and
+    // both proceed. Serialize provisioning per node with an advisory lock
+    // before re-checking, rather than trusting the earlier read.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${node.id})::bigint)`;
+
     if (!existing) {
       const active = await tx.device.count({ where: { userId, status: "ACTIVE" } });
       if (active >= env.MAX_DEVICES_PER_USER) {
         throw badRequest("device_limit_reached", `Maximum ${env.MAX_DEVICES_PER_USER} devices`);
+      }
+    }
+
+    const isNewToThisNode = !existing || existing.nodeId !== node.id || existing.status !== "ACTIVE";
+    if (isNewToThisNode) {
+      const nodeLoad = await tx.device.count({ where: { nodeId: node.id, status: "ACTIVE" } });
+      if (nodeLoad >= node.capacity) {
+        throw new HttpError(503, "no_capacity", `No node with capacity in ${regionCode}`);
       }
     }
 
