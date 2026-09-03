@@ -1,50 +1,71 @@
-import { PrismaClient } from "@prisma/client";
+import { prisma, disconnect } from "../src/lib/prisma";
 import { TICK_PASS_TIERS } from "../src/services/pricingService";
-const prisma = new PrismaClient();
 
+/**
+ * Idempotent seed. The old version did deleteMany() on Product, which would
+ * orphan Purchase rows the moment real checkouts existed.
+ */
 async function main() {
-  // Product.name isn't unique, so skipDuplicates can't prevent re-seeding
-  // from piling up duplicate rows — wipe and reinsert instead. Safe in this
-  // dev build: nothing here goes through real Stripe checkout (only the
-  // /dev/credit-* bypass), so no Purchase rows reference these ids.
-  await prisma.product.deleteMany({});
-  await prisma.product.createMany({
-    // VPN Days flat-window packs are retired — see tickvpn-pricing-model.md.
-    // Every tier is now a metered Tick Pass, priced off one formula and
-    // anchored to a single source of truth (pricingService.ts) instead of
-    // being hardcoded here.
-    data: TICK_PASS_TIERS.map((t) => ({
-      name: t.name,
+  for (const [i, tier] of TICK_PASS_TIERS.entries()) {
+    const existing = await prisma.product.findFirst({ where: { durationMinutes: tier.minutes } });
+    const data = {
+      name: tier.name,
       kind: "TIME_PACK" as const,
-      durationMinutes: t.minutes,
-      priceCents: t.priceCents,
-    })),
-  });
+      durationMinutes: tier.minutes,
+      priceCents: tier.priceCents,
+      sortOrder: i,
+      active: true,
+    };
+    if (existing) await prisma.product.update({ where: { id: existing.id }, data });
+    else await prisma.product.create({ data });
+  }
 
-  const regions = await prisma.region.createMany({
-    data: [
-      { code: "us", name: "United States", country: "US", city: "New York", sortOrder: 1 },
-      { code: "eu", name: "Europe", country: "DE", city: "Frankfurt", sortOrder: 2 },
-      { code: "asia", name: "Asia", country: "SG", city: "Singapore", sortOrder: 3 },
-    ],
-    skipDuplicates: true,
-  });
+  const regions = [
+    { code: "us", name: "United States", country: "US", city: "New York", sortOrder: 1, subnetBase: "10.8.1" },
+    { code: "eu", name: "Europe", country: "DE", city: "Frankfurt", sortOrder: 2, subnetBase: "10.8.2" },
+    { code: "asia", name: "Asia", country: "SG", city: "Singapore", sortOrder: 3, subnetBase: "10.8.3" },
+  ];
 
-  // Mock nodes so provisioning works end-to-end before real droplets exist.
-  const us = await prisma.region.findUnique({ where: { code: "us" } });
-  const eu = await prisma.region.findUnique({ where: { code: "eu" } });
-  const asia = await prisma.region.findUnique({ where: { code: "asia" } });
+  for (const r of regions) {
+    const region = await prisma.region.upsert({
+      where: { code: r.code },
+      update: { name: r.name, country: r.country, city: r.city, sortOrder: r.sortOrder, active: true },
+      create: { code: r.code, name: r.name, country: r.country, city: r.city, sortOrder: r.sortOrder },
+    });
 
-  await prisma.vPNNode.createMany({
-    data: [
-      { regionId: us!.id, hostname: "us-node-1.mock", publicIp: "203.0.113.10", publicKey: "mockkey-us-1" },
-      { regionId: eu!.id, hostname: "eu-node-1.mock", publicIp: "203.0.113.20", publicKey: "mockkey-eu-1" },
-      { regionId: asia!.id, hostname: "asia-node-1.mock", publicIp: "203.0.113.30", publicKey: "mockkey-asia-1" },
-    ],
-    skipDuplicates: true,
-  });
+    // One node per region. Public keys and IPs are placeholders until Terraform
+    // creates real droplets; the local dev node below is the one that works.
+    const hostname = `${r.code}-node-1`;
+    const existing = await prisma.vPNNode.findFirst({ where: { hostname } });
+    if (!existing) {
+      await prisma.vPNNode.create({
+        data: {
+          regionId: region.id,
+          hostname,
+          publicIp: process.env[`NODE_IP_${r.code.toUpperCase()}`] ?? "127.0.0.1",
+          publicKey: process.env[`NODE_PUBKEY_${r.code.toUpperCase()}`] ?? `placeholder-${r.code}`,
+          subnetBase: r.subnetBase,
+          status: "HEALTHY",
+        },
+      });
+    }
+  }
 
-  console.log("Seed complete.");
+  const counts = {
+    products: await prisma.product.count(),
+    regions: await prisma.region.count(),
+    nodes: await prisma.vPNNode.count(),
+  };
+  console.log("Seed complete:", counts);
+  console.log(
+    "\nA Day Pass is %d minutes. Mint a node agent token with:\n  POST /dev/nodes/<nodeId>/token",
+    Number(process.env.MINUTES_PER_DAY_PASS ?? 1440)
+  );
 }
 
-main().finally(() => prisma.$disconnect());
+main()
+  .catch((e) => {
+    console.error(e);
+    process.exitCode = 1;
+  })
+  .finally(() => disconnect());

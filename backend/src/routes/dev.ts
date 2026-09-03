@@ -1,109 +1,78 @@
 import { Router } from "express";
 import crypto from "crypto";
 import { PrismaClient } from "@prisma/client";
-import { requireAuth } from "../lib/auth";
-import { applyWalletTransaction, InsufficientBalanceError } from "../services/walletService";
-import { startOrExtendUsageWindow } from "../services/usageService";
-import { startTimeSession, tickTimeSession, endTimeSession, getTimeStatus } from "../services/timeUsageService";
+import { requireAuth, AuthedRequest } from "../lib/auth";
+import { asyncRoute, badRequest } from "../lib/errors";
+import { env } from "../lib/env";
+import { generateAgentToken } from "../lib/nodeAuth";
+import { applyWalletTransaction } from "../services/walletService";
 
 /**
- * These routes exist ONLY so the wallet, usage-window, and time-session
- * logic can be clicked through in a browser before Stripe and real VPN
- * nodes exist. All are hard-blocked outside development so they can never
- * ship live.
+ * Local-only helpers so the wallet and metering can be exercised before Stripe
+ * and real droplets exist.
  *
- *  - /dev/credit-wallet        stands in for a completed Stripe purchase of a VPN Days pack
- *  - /dev/credit-minutes       stands in for a completed Stripe purchase of a time pass
- *  - /vpn/test-connect         stands in for a real node reporting "user connected" (day-pass / window mode)
- *  - /vpn/test-connect-timed   same, but for a metered time-pass session
- *  - /vpn/test-disconnect-timed stands in for a real node reporting "user disconnected" (stops the meter)
+ * These are gated twice: env.enableDevRoutes requires an explicit
+ * ENABLE_DEV_ROUTES=true, and that flag is forced false whenever
+ * NODE_ENV=production. The old guard only checked that NODE_ENV was not
+ * "production", so an unset NODE_ENV — the default on plenty of hosts — left
+ * an endpoint live that mints unlimited balance.
  */
 export function devRouter(prisma: PrismaClient) {
   const router = Router();
+  if (!env.enableDevRoutes) return router;
 
-  router.use((_req, res, next) => {
-    if (process.env.NODE_ENV === "production") {
-      return res.status(404).json({ error: "Not available" });
-    }
-    next();
-  });
+  console.warn("[dev] DEV ROUTES ARE ENABLED — /dev/* can mint wallet balance");
+  const auth = requireAuth(prisma);
 
-  router.post("/dev/credit-wallet", requireAuth, async (req, res) => {
-    const userId = (req as any).userId as string;
-    const days = Number(req.body?.days) || 10;
-
-    const { transaction } = await applyWalletTransaction(prisma, {
-      userId,
-      type: "PROMOTIONAL",
-      amount: days,
-      referenceType: "dev_test_credit",
-      idempotencyKey: `dev:${userId}:${crypto.randomUUID()}`,
-    });
-
-    return res.json({ transaction });
-  });
-
-  router.post("/vpn/test-connect", requireAuth, async (req, res) => {
-    const userId = (req as any).userId as string;
-    try {
-      const result = await startOrExtendUsageWindow(prisma, userId);
-      return res.json(result);
-    } catch (err) {
-      if (err instanceof InsufficientBalanceError) {
-        return res.status(402).json({ error: "insufficient_balance" });
-      }
-      throw err;
-    }
-  });
-
-  router.post("/dev/credit-minutes", requireAuth, async (req, res) => {
-    const userId = (req as any).userId as string;
-    const minutes = Number(req.body?.minutes) || 60;
-
-    const { transaction } = await applyWalletTransaction(prisma, {
+  const credit = async (userId: string, minutes: number, note: string) => {
+    const { transaction, balanceAfter } = await applyWalletTransaction(prisma, {
       userId,
       type: "PROMOTIONAL",
       amount: minutes,
       unit: "MINUTE",
       referenceType: "dev_test_credit",
-      idempotencyKey: `dev:${userId}:${crypto.randomUUID()}`,
+      idempotencyKey: `dev:${crypto.randomUUID()}`,
+      metadata: { note },
     });
+    return { transaction, minuteBalance: balanceAfter };
+  };
 
-    return res.json({ transaction });
-  });
+  /** A day's worth of pass: 1440 minutes. */
+  router.post(
+    "/dev/credit-day",
+    auth,
+    asyncRoute(async (req: AuthedRequest, res) => {
+      const days = Number(req.body?.days ?? 1);
+      if (!Number.isInteger(days) || days < 1 || days > 365) throw badRequest("invalid_days");
+      const result = await credit(req.userId as string, days * env.MINUTES_PER_DAY_PASS, `${days} day pass`);
+      return res.json({ ...result, daysRemaining: result.minuteBalance / env.MINUTES_PER_DAY_PASS });
+    })
+  );
 
-  router.post("/vpn/test-connect-timed", requireAuth, async (req, res) => {
-    const userId = (req as any).userId as string;
-    try {
-      const result = await startTimeSession(prisma, userId);
-      return res.json(result);
-    } catch (err) {
-      if (err instanceof InsufficientBalanceError) {
-        return res.status(402).json({ error: "insufficient_balance" });
-      }
-      throw err;
-    }
-  });
+  router.post(
+    "/dev/credit-minutes",
+    auth,
+    asyncRoute(async (req: AuthedRequest, res) => {
+      const minutes = Number(req.body?.minutes ?? 60);
+      if (!Number.isInteger(minutes) || minutes < 1 || minutes > 525_600) throw badRequest("invalid_minutes");
+      return res.json(await credit(req.userId as string, minutes, "manual credit"));
+    })
+  );
 
-  // Called periodically while a time session is active, so the meter
-  // actually advances (and the UI reflects the running balance).
-  router.post("/vpn/tick-timed", requireAuth, async (req, res) => {
-    const userId = (req as any).userId as string;
-    const result = await tickTimeSession(prisma, userId);
-    return res.json(result);
-  });
-
-  router.post("/vpn/test-disconnect-timed", requireAuth, async (req, res) => {
-    const userId = (req as any).userId as string;
-    const result = await endTimeSession(prisma, userId);
-    return res.json(result);
-  });
-
-  router.get("/vpn/status-timed", requireAuth, async (req, res) => {
-    const userId = (req as any).userId as string;
-    const result = await getTimeStatus(prisma, userId);
-    return res.json(result);
-  });
+  /**
+   * Mint a bearer token for a node. Printed once and never stored in plaintext.
+   * In production this is an admin action with an audit event, not a dev route.
+   */
+  router.post(
+    "/dev/nodes/:nodeId/token",
+    asyncRoute(async (req, res) => {
+      const node = await prisma.vPNNode.findUnique({ where: { id: req.params.nodeId } });
+      if (!node) throw badRequest("node_not_found");
+      const { token, hash } = generateAgentToken();
+      await prisma.vPNNode.update({ where: { id: node.id }, data: { agentTokenHash: hash } });
+      return res.json({ nodeId: node.id, hostname: node.hostname, agentToken: token });
+    })
+  );
 
   return router;
 }

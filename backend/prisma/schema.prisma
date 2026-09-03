@@ -1,5 +1,7 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["queryCompiler", "driverAdapters"]
+  engineType      = "client"
 }
 
 datasource db {
@@ -34,13 +36,13 @@ enum TimeSessionStatus {
 }
 
 enum ProductKind {
-  DAY_PACK   // whole VPN Days — flat charge per 24h window, reconnects inside it are free
-  TIME_PACK  // short passes (30 min / 1h / 3h / 6h / 12h) — metered minute-by-minute while connected
+  DAY_PACK // retired — kept so historical Purchase rows still resolve
+  TIME_PACK // every product is metered minutes now; a Day Pass is 1440 of them
 }
 
 enum WalletUnit {
-  DAY
-  MINUTE
+  DAY // retired — historical ledger rows only
+  MINUTE // the only currency
 }
 
 enum DeviceStatus {
@@ -56,47 +58,60 @@ enum NodeStatus {
 }
 
 model User {
-  id            String    @id @default(uuid())
-  email         String    @unique
-  emailVerified Boolean   @default(false)
-  status        String    @default("ACTIVE") // ACTIVE | SUSPENDED
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  id            String   @id @default(uuid())
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  status        String   @default("ACTIVE") // ACTIVE | SUSPENDED
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
-  wallet    Wallet?
-  purchases Purchase[]
-  devices   Device[]
+  wallet       Wallet?
+  purchases    Purchase[]
+  devices      Device[]
   usageWindows UsageWindow[]
   timeSessions TimeSession[]
+  sessions     Session[]
+  loginTokens  LoginToken[]
 }
 
 model Wallet {
-  id            String   @id @default(uuid())
-  userId        String   @unique
-  user          User     @relation(fields: [userId], references: [id])
-  balance       Int      @default(0) // whole VPN Days, never fractional
-  minuteBalance Int      @default(0) // metered minutes, for short time passes (30m/1h/3h/6h/12h)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id     String @id @default(uuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id])
+
+  /// Retired. Whole VPN Days were replaced by metered minutes; kept at 0 so
+  /// historical DAY ledger rows still reconcile. Never written now.
+  balance Int @default(0)
+
+  /// The wallet. A Day Pass credits 1440 of these.
+  minuteBalance Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   transactions WalletTransaction[]
 }
 
-// Immutable ledger. Never update a row — every balance change is a new row.
+/// Immutable ledger. The application role has no UPDATE or DELETE grant on
+/// this table — corrections are new REVERSAL rows.
 model WalletTransaction {
-  id            String   @id @default(uuid())
+  id            String     @id @default(uuid())
   walletId      String
-  wallet        Wallet   @relation(fields: [walletId], references: [id])
+  wallet        Wallet     @relation(fields: [walletId], references: [id])
   type          TxType
-  unit          WalletUnit @default(DAY) // which wallet balance this row affects — DAY or MINUTE
-  amount        Int // signed: +N credit, -N debit (days if unit=DAY, minutes if unit=MINUTE)
+  unit          WalletUnit @default(MINUTE)
+  amount        Int // signed: +N credit, -N debit
   balanceBefore Int
   balanceAfter  Int
-  referenceType String? // "purchase" | "usage_window" | "time_session" | "admin" | ...
+  referenceType String?
   referenceId   String?
-  idempotencyKey String? @unique // enforces exactly-once for webhooks/usage events
-  metadata      Json?
-  createdAt     DateTime @default(now())
+
+  /// Required. Derived from the entity the change belongs to (a session id, a
+  /// Stripe event id, a purchase id) — never from wall-clock time.
+  idempotencyKey String @unique
+
+  metadata  Json?
+  createdAt DateTime @default(now())
 
   @@index([walletId, createdAt])
 }
@@ -104,34 +119,46 @@ model WalletTransaction {
 model Product {
   id              String      @id @default(uuid())
   name            String
-  kind            ProductKind @default(DAY_PACK)
-  vpnDays         Int?        // set when kind = DAY_PACK
-  durationMinutes Int?        // set when kind = TIME_PACK (30, 60, 180, 360, 720, ...)
+  kind            ProductKind @default(TIME_PACK)
+  vpnDays         Int? // retired
+  durationMinutes Int? // minutes granted
   priceCents      Int
   currency        String      @default("usd")
   stripePriceId   String?
   active          Boolean     @default(true)
+  sortOrder       Int         @default(0)
 
   purchases Purchase[]
 }
 
 model Purchase {
-  id                String         @id @default(uuid())
-  userId            String
-  user              User           @relation(fields: [userId], references: [id])
-  productId         String
-  product           Product        @relation(fields: [productId], references: [id])
-  stripeSessionId   String?        @unique
-  stripePaymentIntentId String?    @unique
-  amountCents       Int
-  status            PurchaseStatus @default(PENDING)
-  createdAt         DateTime       @default(now())
-  updatedAt         DateTime       @updatedAt
+  id                    String         @id @default(uuid())
+  userId                String
+  user                  User           @relation(fields: [userId], references: [id])
+  productId             String
+  product               Product        @relation(fields: [productId], references: [id])
+  stripeSessionId       String?        @unique
+  stripePaymentIntentId String?        @unique
+  amountCents           Int
+  status                PurchaseStatus @default(PENDING)
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  @@index([userId, createdAt])
+}
+
+/// Every Stripe event we have seen, inserted before processing (D4 step 2).
+/// The insert is the idempotency gate; the wallet's unique key is the backstop.
+model StripeEvent {
+  id          String    @id // Stripe's evt_... id
+  type        String
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
 }
 
 model Region {
   id        String  @id @default(uuid())
-  code      String  @unique // "us", "eu", "asia"
+  code      String  @unique
   name      String
   country   String
   city      String
@@ -142,29 +169,70 @@ model Region {
 }
 
 model VPNNode {
-  id        String     @id @default(uuid())
-  regionId  String
-  region    Region     @relation(fields: [regionId], references: [id])
-  hostname  String
-  publicIp  String
+  id       String @id @default(uuid())
+  regionId String
+  region   Region @relation(fields: [regionId], references: [id])
+  hostname String
+  publicIp String
+
+  /// The node's WireGuard public key (not a secret).
   publicKey String
-  status    NodeStatus @default(HEALTHY)
-  capacity  Int        @default(200) // max peers
-  currentPeers Int     @default(0)
-  createdAt DateTime   @default(now())
+
+  /// First three octets of this node's tunnel subnet, e.g. "10.8.0".
+  /// Peer addresses are allocated within it, per node.
+  subnetBase String @default("10.8.0")
+
+  /// SHA-256 of this node's bearer token. Per-node, so a compromised node
+  /// cannot speak for any other node (D7). Never store the token itself.
+  agentTokenHash String?
+
+  listenPort Int        @default(51820)
+  status     NodeStatus @default(HEALTHY)
+  capacity   Int        @default(200)
+  lastSeenAt DateTime?
+  createdAt  DateTime   @default(now())
+
+  devices Device[]
+
+  @@index([regionId, status])
 }
 
 model Device {
-  id              String       @id @default(uuid())
-  userId          String
-  user            User         @relation(fields: [userId], references: [id])
-  name            String
-  publicKey       String       @unique
-  status          DeviceStatus @default(ACTIVE)
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+  name   String
+
+  /// The device's WireGuard public key. The private key is generated on the
+  /// client and must never reach this server.
+  publicKey String @unique
+
+  status DeviceStatus @default(ACTIVE)
+
+  /// Which node this peer lives on, so revocation can actually remove it.
+  nodeId String?
+  node   VPNNode? @relation(fields: [nodeId], references: [id])
+
+  /// Allocated tunnel address, e.g. "10.8.0.14/32". Unique per node.
+  internalIp String?
+
+  // ---- telemetry, written only by the node report loop ----
+  lastHandshakeAt DateTime?
+  rxBytes         BigInt    @default(0) // last absolute counter seen
+  txBytes         BigInt    @default(0)
+  cumulativeBytes BigInt    @default(0) // sum of deltas since the peer was installed
+  qualifiedAt     DateTime? // first moment this peer counted as real usage
+
   lastConnectedAt DateTime?
-  createdAt       DateTime     @default(now())
+  createdAt       DateTime  @default(now())
+
+  @@unique([nodeId, internalIp])
+  @@index([userId, status])
+  @@index([status])
 }
 
+/// Retired: the flat 24-hour window model. Table kept so historical rows and
+/// their ledger references survive; nothing writes to it any more.
 model UsageWindow {
   id                  String            @id @default(uuid())
   userId              String
@@ -173,26 +241,69 @@ model UsageWindow {
   endsAt              DateTime
   walletTransactionId String            @unique
   status              UsageWindowStatus @default(ACTIVE)
-  bytesUsed            BigInt           @default(0)
+  bytesUsed           BigInt            @default(0)
 
   @@index([userId, status])
 }
 
-// Metered time-pack session (30m/1h/3h/6h/12h passes). Unlike UsageWindow
-// (flat charge per fixed 24h window), this drains the wallet's minuteBalance
-// minute-by-minute only while ACTIVE. Disconnecting ends/pauses it; the
-// partial unique index in migrations_manual/002 enforces one ACTIVE session
-// per user at the DB level, same pattern as one_active_window_per_user.
+/// A metered connection. Opened when a device's traffic first qualifies, billed
+/// minute by minute from node reports, ended when the peer goes quiet or the
+/// wallet runs out. One ACTIVE session per user, enforced by a partial unique
+/// index.
 model TimeSession {
-  id            String            @id @default(uuid())
-  userId        String
-  user          User              @relation(fields: [userId], references: [id])
-  startsAt      DateTime          @default(now())
-  lastBilledAt  DateTime          @default(now())
-  endedAt       DateTime?
-  status        TimeSessionStatus @default(ACTIVE)
-  minutesBilled Int               @default(0) // running total charged this session
-  bytesUsed     BigInt            @default(0)
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  /// The device whose traffic opened this session.
+  deviceId String?
+
+  startsAt     DateTime          @default(now())
+  lastBilledAt DateTime          @default(now())
+  lastSeenAt   DateTime          @default(now())
+  endedAt      DateTime?
+  endedReason  String? // "ran_out" | "idle" | "revoked" | "manual"
+  status       TimeSessionStatus @default(ACTIVE)
+
+  minutesBilled Int    @default(0)
+  bytesUsed     BigInt @default(0)
 
   @@index([userId, status])
+  @@index([status, lastSeenAt])
+}
+
+/// Postgres-backed rate limiting (D6 — one fewer vendor than Redis at MVP scale).
+model RateLimitHit {
+  id        String   @id @default(uuid())
+  bucket    String // e.g. "login:ip:1.2.3.4" or "login:email:a@b.com"
+  createdAt DateTime @default(now())
+
+  @@index([bucket, createdAt])
+}
+
+/// Server-side sessions so a login can actually be revoked (D6). The cookie
+/// carries a random secret; only its SHA-256 is stored here.
+model Session {
+  tokenHash  String   @id
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  lastUsedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+/// Magic-link tokens. Only the SHA-256 is stored, and single-use is enforced
+/// in the same transaction that issues the session.
+model LoginToken {
+  tokenHash String    @id
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([expiresAt])
 }

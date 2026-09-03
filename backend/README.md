@@ -1,84 +1,80 @@
-# TickVPN — MVP Backend Scaffold
+# TickVPN — backend
 
-This is Sprint 2 + Sprint 3 from the PRD: **Commerce** and **Usage Engine**.
-That's the core IP — atomic wallet, idempotent payments, exactly-one-credit-per-window.
-Everything here is real, runnable code.
+Node + Postgres control plane for metered VPN passes.
 
-## What's real vs. stubbed
+## The model, in one paragraph
 
-| Component | Status |
-|---|---|
-| Postgres schema (Prisma) | Real — matches PRD domain model exactly |
-| Wallet ledger (atomic, idempotent) | Real |
-| Usage window engine (24h, race-safe) | Real |
-| Stripe checkout + webhook | Real — needs your live Stripe keys |
-| Passwordless auth | Real for MVP (in-memory sessions — swap for Redis before prod) |
-| VPN provisioning | **Mocked.** `MockNodeAdapter` in `provisioningService.ts` stands in for real DO droplets + WireGuard. Swap it for a `RealNodeAdapter` that SSHes into your nodes or calls a small agent running on each droplet — nothing else in the app changes. |
-| Terraform / droplet setup | Not included — that's Sprint 1, needs your DO account |
+A wallet holds **minutes**. A Day Pass is 1,440 of them. Minutes are consumed
+only while a device is actually carrying traffic, measured on the node — not in
+the browser, not by a timer that starts at purchase. Disconnect and the meter
+stops; unused minutes stay in the wallet for the next trip. When the balance
+reaches zero the device leaves the authorised peer set and the node drops the
+peer within one reconcile pass, so a zero balance really does end the tunnel.
 
-## The two things that actually matter
+## How a connection becomes money
 
-1. **`walletService.ts`** — every balance change is atomic (row lock) and idempotent (unique key). This is what stops double-crediting on a Stripe webhook retry and stops a negative balance on concurrent usage.
-2. **`usageService.ts`** — one VPN Day per 24h window, reconnects inside the window are free. There's also a partial unique index (`prisma/migrations_manual/001_one_active_window_per_user.sql`) as a DB-level backstop in case two devices connect in the same instant.
-
-## Try it in your browser
-
-Once `setup.bat` finishes (or `npm run dev` if running manually), open
-**http://localhost:3001** in your browser. That's a small connected test
-app — real API calls, not the design mockup. It lets you:
-
-- Log in with any email (no real email is sent — this test build shows you
-  the login token directly instead of emailing it)
-- "Buy" test VPN Days without Stripe (`/dev/credit-wallet` — dev-only, blocked in production)
-- Add a device and pick a region (calls the real, mock-backed provisioning service)
-- Click **Connect now** and watch the balance actually drop by one day, a
-  24-hour countdown start, and — if you click Connect again — watch it
-  **not** charge you again, because you're still inside that window. That
-  reconnect-is-free behavior is the core of the product; this is where you
-  can see it work.
-- Try connecting with zero balance and see it get correctly blocked
-
-Sessions live in server memory, so restarting the server logs everyone out —
-fine for local testing, not for production.
-
-## Running it (Windows — one click)
-
-Double-click **`setup.bat`**. It will:
-1. Check for Node.js and Docker
-2. Start a Postgres container (`vpndays-db`) if Docker is available
-3. `npm install`
-4. Create `.env` from the template (edit it first if your DB creds differ)
-5. Generate Prisma client + run migrations
-6. Seed products/regions/mock nodes
-7. Start the dev server on `:3001`
-
-After the first run, apply the manual partial-index migration once:
 ```
-psql postgresql://postgres:password@localhost:5432/vpndays -f prisma/migrations_manual/001_one_active_window_per_user.sql
+device carries traffic
+  -> node agent: `wg show wg0 dump` every 10s
+  -> POST /api/internal/nodes/:id/report      (per-node bearer token)
+  -> qualifying?  handshake < 180s AND >= 5 MB moved since install
+  -> minutes debited from the wallet, one ledger row per tick
+  -> balance hits 0 -> device leaves computeAllowedPeers()
+  -> agent GETs /peers every 15s and removes it from wg0
 ```
-(or run it in any Postgres GUI client — pgAdmin, TablePlus, DBeaver).
 
-## Running it (manual)
+The agent is outbound-only and is the only writer to `wg0`.
+
+## Running it locally
+
+Needs Node 20+ and a Postgres 16.
 
 ```bash
+# 1. database + least-privilege role (the ledger grant lives here)
+createdb tickvpn
+psql "$ADMIN_URL" -v app_password=choose-one -v DBNAME=tickvpn -f prisma/sql/app_role.sql
+
+# 2. config
+cp .env.example .env        # point DATABASE_URL at tickvpn_app
+
+# 3. schema, client, data
 npm install
-cp .env.example .env   # fill in DATABASE_URL, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
 npm run prisma:generate
 npm run prisma:migrate
-npm run seed            # loads the 3 products + 3 regions + mock nodes from the PRD
-npm run dev
+npm run seed
+
+# 4. go
+npm run dev                 # http://localhost:3001
 ```
 
-Test the flow:
+The server refuses to start on invalid configuration rather than silently
+disabling a security control, and prints the switches that change behaviour.
+
+## Tests
+
 ```bash
-curl -X POST localhost:3001/auth/login -H "Content-Type: application/json" -d '{"email":"sk@test.com"}'
-# grab the token from the console log, then:
-curl -X POST localhost:3001/auth/verify -H "Content-Type: application/json" -d '{"token":"..."}'
-curl localhost:3001/products
+npx ts-node tests/live-tunnel.ts   # full journey against a real WireGuard tunnel
+npx ts-node tests/regressions.ts   # one test per audit finding
 ```
 
-## Next step
+`live-tunnel.ts` needs a real `wg0` and a client in a network namespace; see the
+header of that file. `regressions.ts` needs only the server and the database.
 
-When your DO droplets and WireGuard are live (Sprint 1), write `RealNodeAdapter`
-implementing the same `VPNNodeAdapter` interface. That's the only file that
-needs to change — wallet, usage engine, and every route stay exactly as-is.
+## Installing a node
+
+```bash
+# on the droplet, after WireGuard is up
+sudo TICKVPN_API_URL=https://api.example.com \
+     TICKVPN_NODE_ID=<node uuid> \
+     TICKVPN_NODE_TOKEN=<minted token> \
+     bash node-agent/install-agent.sh
+```
+
+Mint the token with `POST /dev/nodes/:nodeId/token` in development, or the admin
+equivalent once that exists. It is shown once and stored only as a SHA-256 hash.
+
+## What is deliberately not built yet
+
+Stripe underwriting and live keys; email delivery of magic links (tokens are
+logged in development only); Terraform; the admin portal; monitoring; the
+retention purge job.
