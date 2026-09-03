@@ -1,5 +1,6 @@
 import path from "path";
 import express from "express";
+import cors from "cors";
 import cookieParser from "cookie-parser";
 import { env, assertConfigValid, configSummary } from "./lib/env";
 import { prisma, disconnect, assertLedgerImmutable } from "./lib/prisma";
@@ -23,6 +24,12 @@ assertConfigValid();
 
 const app = express();
 app.set("trust proxy", 1); // so req.ip is the client, not the load balancer
+
+// The frontend is a separate origin (Next.js dev server on :3000, the API on
+// :3001). One allowed origin, not "*" — the session cookie rides on
+// credentialed requests, and CORS forbids combining a wildcard origin with
+// credentials anyway.
+app.use(cors({ origin: env.APP_URL, credentials: true }));
 
 // The Stripe webhook needs the raw body, so it is mounted before express.json().
 app.use(webhookRouter(prisma));

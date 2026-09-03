@@ -51,7 +51,8 @@ export const env = {
 
   DATABASE_URL: required("DATABASE_URL"),
   PORT: integer("PORT", 3001),
-  APP_URL: optional("APP_URL", "http://localhost:3001"),
+  /** The frontend's origin: Stripe redirect target and the sole allowed CORS origin. */
+  APP_URL: optional("APP_URL", "http://localhost:3000"),
 
   /** Dev/test endpoints that mint balance. Never reachable in production. */
   enableDevRoutes: devRoutesRequested && !isProduction,
