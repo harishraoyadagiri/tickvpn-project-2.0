@@ -15,6 +15,10 @@ const check = (c: boolean, id: string, label: string, detail = "") => {
 const head = (s: string) => console.log(`\n${"─".repeat(76)}\n${s}\n${"─".repeat(76)}`);
 
 async function newUser() {
+  // The login rate limiter is real and shared per IP, so a harness that signs
+  // up several users in a row would throttle itself. Clear the bucket first —
+  // H7 below tests the limiter deliberately, with its own reset.
+  await pg.query(`DELETE FROM "RateLimitHit"`);
   let cookie = "";
   const email = `reg+${Date.now()}${Math.random().toString(36).slice(2, 6)}@t.test`;
   const l = await fetch(BASE + "/auth/login", {

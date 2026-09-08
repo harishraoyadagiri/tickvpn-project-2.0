@@ -3,8 +3,13 @@
  * then one character from the restricted final-quantum set, then '='. Anything
  * else is not a key, and letting one through means writing junk into
  * `wg set wg0 peer ...` on a real node.
+ *
+ * The final character encodes only 4 significant bits, so its base64 value must
+ * be a multiple of 4. That is sixteen characters, not thirteen — the digits
+ * 0, 4 and 8 belong in the set too (values 52, 56, 60). Leaving them out
+ * rejected roughly one in five perfectly valid keys.
  */
-const WG_KEY = /^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw]=$/;
+const WG_KEY = /^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$/;
 
 export function isValidWireGuardKey(key: unknown): key is string {
   return typeof key === "string" && WG_KEY.test(key);
