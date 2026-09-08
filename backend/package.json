@@ -18,10 +18,12 @@
   "dependencies": {
     "@prisma/adapter-pg": "^6.19.3",
     "@prisma/client": "^6.19.3",
+    "@types/nodemailer": "^8.0.1",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.6",
     "dotenv": "^16.6.1",
     "express": "^4.19.2",
+    "nodemailer": "^10.0.1",
     "pg": "^8.13.1",
     "stripe": "^16.8.0"
   },

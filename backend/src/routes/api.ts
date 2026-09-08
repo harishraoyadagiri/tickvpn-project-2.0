@@ -17,6 +17,7 @@ import { getConnectionStatus } from "../services/meteringService";
 import { consume } from "../services/rateLimitService";
 import { BASE_RATE, DECAY_EXP, TICK_PASS_TIERS, formulaPriceCents } from "../services/pricingService";
 import { getTrending } from "../services/contentDiscoveryService";
+import { sendMagicLink } from "../lib/email";
 
 const HOUR = 3_600_000;
 
@@ -47,12 +48,15 @@ export function apiRouter(prisma: PrismaClient) {
       const user = await getOrCreateUser(prisma, email);
       const token = await issueLoginToken(prisma, user.id);
 
-      // TODO: hand to Postmark/Resend once the provider exists. Until then the
-      // token is only ever surfaced outside production.
-      if (!env.isProduction) console.log(`[dev] magic link token for ${email}: ${token}`);
+      const sent = await sendMagicLink(email, token);
 
-      // Always 200 regardless of whether the account existed — no enumeration.
-      return res.json({ ok: true, ...(env.isProduction ? {} : { devToken: token }) });
+      // Always 200 regardless of whether the account existed, and regardless of
+      // whether delivery succeeded — neither must leak whether an address is
+      // registered. Failures are logged, not returned.
+      return res.json({
+        ok: true,
+        ...(env.isProduction ? {} : { devToken: token, emailTransport: sent.transport, delivered: sent.delivered }),
+      });
     })
   );
 

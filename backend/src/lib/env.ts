@@ -26,6 +26,12 @@ function optional(name: string, fallback: string): string {
   return v && v.trim() !== "" ? v.trim() : fallback;
 }
 
+function list(name: string): string[] {
+  const raw = process.env[name];
+  if (!raw || raw.trim() === "") return [];
+  return raw.split(",").map((v) => v.trim().toLowerCase()).filter(Boolean);
+}
+
 function integer(name: string, fallback: number): number {
   const raw = process.env[name];
   if (!raw || raw.trim() === "") return fallback;
@@ -81,6 +87,20 @@ export const env = {
   NODE_AGENT_PORT: integer("NODE_AGENT_PORT", 8787),
   NODE_AGENT_TIMEOUT_MS: integer("NODE_AGENT_TIMEOUT_MS", 5000),
 
+  /**
+   * Magic-link delivery. "console" prints the link and sends nothing, which is
+   * fine locally and refused in production.
+   */
+  EMAIL_PROVIDER: optional("EMAIL_PROVIDER", "console") as "console" | "resend" | "smtp",
+  EMAIL_FROM: optional("EMAIL_FROM", "TickVPN <onboarding@resend.dev>"),
+  /** While testing: only these addresses receive mail. Empty means no limit. */
+  EMAIL_ALLOWLIST: list("EMAIL_ALLOWLIST"),
+  RESEND_API_KEY: optional("RESEND_API_KEY", ""),
+  SMTP_HOST: optional("SMTP_HOST", "smtp.gmail.com"),
+  SMTP_PORT: integer("SMTP_PORT", 465),
+  SMTP_USER: optional("SMTP_USER", ""),
+  SMTP_PASSWORD: optional("SMTP_PASSWORD", ""),
+
   /** Cookies. Secure must be on anywhere that isn't plain-http local dev. */
   COOKIE_SECURE: optional("COOKIE_SECURE", isProduction ? "true" : "false") === "true",
 };
@@ -95,6 +115,18 @@ export function assertConfigValid(): void {
   }
   if (isProduction && !env.COOKIE_SECURE) {
     problems.push("COOKIE_SECURE must be true in production");
+  }
+  if (isProduction && env.EMAIL_PROVIDER === "console") {
+    problems.push("EMAIL_PROVIDER cannot be 'console' in production — nobody could sign in");
+  }
+  if (env.EMAIL_PROVIDER === "resend" && !env.RESEND_API_KEY) {
+    problems.push("EMAIL_PROVIDER=resend requires RESEND_API_KEY");
+  }
+  if (env.EMAIL_PROVIDER === "smtp" && (!env.SMTP_USER || !env.SMTP_PASSWORD)) {
+    problems.push("EMAIL_PROVIDER=smtp requires SMTP_USER and SMTP_PASSWORD");
+  }
+  if (!["console", "resend", "smtp"].includes(env.EMAIL_PROVIDER)) {
+    problems.push(`EMAIL_PROVIDER must be console, resend or smtp (got ${env.EMAIL_PROVIDER})`);
   }
   if (problems.length > 0) {
     throw new ConfigError(
@@ -113,6 +145,7 @@ export function configSummary() {
     devRoutes: env.enableDevRoutes ? "ENABLED" : "disabled",
     nodes: env.useRealNodes ? "real" : "mock",
     stripe: env.STRIPE_SECRET_KEY ? "configured" : "not configured",
+    email: env.EMAIL_PROVIDER + (env.EMAIL_ALLOWLIST.length ? ` (allowlist: ${env.EMAIL_ALLOWLIST.length})` : ""),
     qualifyingBytes: env.QUALIFYING_BYTES,
     handshakeFreshSeconds: env.HANDSHAKE_FRESH_SECONDS,
   };
