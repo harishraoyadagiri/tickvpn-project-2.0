@@ -1,0 +1,357 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same branch — these jobs take minutes and
+# nobody reads the results of a commit that has already been replaced.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  # ───────────────────────────────────────────────────────────────
+  # The money paths: wallet, metering, auth, Stripe, and the database
+  # guarantees. This is the job that must never be allowed to go red.
+  # ───────────────────────────────────────────────────────────────
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: tickvpn
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # The app connects as the least-privilege role, exactly as it should in
+      # production — that is what makes the ledger-immutability test real.
+      DATABASE_URL: postgresql://tickvpn_app:ci-password@localhost:5432/tickvpn
+      # The harnesses assert on grants and constraints, so they need superuser.
+      TEST_ADMIN_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/tickvpn
+      NODE_ENV: development
+      PORT: "3001"
+      APP_URL: http://localhost:3000
+      ENABLE_DEV_ROUTES: "true"
+      USE_REAL_NODES: "false"
+      COOKIE_SECURE: "false"
+      EMAIL_PROVIDER: console
+      # Must match the secret tests/regressions.ts signs its webhooks with.
+      STRIPE_WEBHOOK_SECRET: whsec_regression
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      # `wg genkey` — the key-format tests generate real WireGuard keys rather
+      # than hand-written strings, which is how the validator bug was caught.
+      - name: Install WireGuard tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq wireguard-tools
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Check for vulnerable dependencies
+        working-directory: backend
+        run: npm audit --audit-level=moderate
+
+      - name: Generate Prisma client
+        working-directory: backend
+        run: npm run prisma:generate
+
+      - name: Create the least-privilege application role
+        working-directory: backend
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -d tickvpn \
+            -v ON_ERROR_STOP=1 -v app_password=ci-password -v DBNAME=tickvpn \
+            -f prisma/sql/app_role.sql
+
+      - name: Apply migrations
+        working-directory: backend
+        run: npm run prisma:migrate
+
+      - name: Re-apply grants for tables the migrations created
+        working-directory: backend
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -d tickvpn \
+            -v ON_ERROR_STOP=1 -v app_password=ci-password -v DBNAME=tickvpn \
+            -f prisma/sql/app_role.sql
+
+      - name: Typecheck
+        working-directory: backend
+        run: npm run typecheck
+
+      - name: Seed
+        working-directory: backend
+        run: npm run seed
+
+      - name: Start the API
+        working-directory: backend
+        run: |
+          npm run dev > /tmp/api.log 2>&1 &
+          for i in $(seq 1 45); do
+            if curl -sf http://localhost:3001/health > /dev/null; then
+              echo "API is up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "API never became healthy:"; cat /tmp/api.log; exit 1
+
+      - name: WireGuard key validator (500 real keys)
+        working-directory: backend
+        run: npm run test:keys
+
+      # Concurrency and ordering bugs are probabilistic. The key-validator bug
+      # that shipped was invisible on a single run and only appeared on the
+      # fifth, so this deliberately runs the suite more than once.
+      - name: Regression suite (3 runs)
+        working-directory: backend
+        run: |
+          for run in 1 2 3; do
+            echo "── run $run ──"
+            npm test
+          done
+
+      - name: API log on failure
+        if: failure()
+        run: cat /tmp/api.log || true
+
+  # ───────────────────────────────────────────────────────────────
+  # The claim that cannot be verified with a mock: a real tunnel, real
+  # handshakes, real byte counters, and time actually coming off a day.
+  # ───────────────────────────────────────────────────────────────
+  tunnel:
+    name: End-to-end WireGuard tunnel
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: tickvpn
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://tickvpn_app:ci-password@localhost:5432/tickvpn
+      TEST_ADMIN_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/tickvpn
+      NODE_ENV: development
+      PORT: "3001"
+      APP_URL: http://localhost:3000
+      ENABLE_DEV_ROUTES: "true"
+      USE_REAL_NODES: "false"
+      COOKIE_SECURE: "false"
+      EMAIL_PROVIDER: console
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install WireGuard
+        run: |
+          sudo apt-get update -qq
+          # wireguard-go is the fallback when the runner has no kernel module.
+          sudo apt-get install -y -qq wireguard-tools wireguard-go || \
+            sudo apt-get install -y -qq wireguard-tools
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Prepare database
+        working-directory: backend
+        run: |
+          npm run prisma:generate
+          PGPASSWORD=postgres psql -h localhost -U postgres -d tickvpn \
+            -v ON_ERROR_STOP=1 -v app_password=ci-password -v DBNAME=tickvpn \
+            -f prisma/sql/app_role.sql
+          npm run prisma:migrate
+          PGPASSWORD=postgres psql -h localhost -U postgres -d tickvpn \
+            -v ON_ERROR_STOP=1 -v app_password=ci-password -v DBNAME=tickvpn \
+            -f prisma/sql/app_role.sql
+          npm run seed
+
+      - name: Build the test tunnel
+        run: sudo -E backend/tests/setup-local-wireguard.sh
+
+      - name: Start the API
+        working-directory: backend
+        run: |
+          npm run dev > /tmp/api.log 2>&1 &
+          for i in $(seq 1 45); do
+            if curl -sf http://localhost:3001/health > /dev/null; then
+              echo "API is up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "API never became healthy:"; cat /tmp/api.log; exit 1
+
+      - name: Connect, meter, run out, disconnect
+        working-directory: backend
+        run: sudo -E env "PATH=$PATH" npm run test:tunnel
+
+      - name: Logs on failure
+        if: failure()
+        run: |
+          cat /tmp/api.log || true
+          sudo wg show || true
+
+  # ───────────────────────────────────────────────────────────────
+  # The frontend against the real API, in a real browser. This is the job
+  # that would have caught the CORS misconfiguration that made the whole app
+  # unusable while every server-side test still passed.
+  # ───────────────────────────────────────────────────────────────
+  browser:
+    name: Browser smoke test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: tickvpn
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://tickvpn_app:ci-password@localhost:5432/tickvpn
+      NODE_ENV: development
+      PORT: "3001"
+      APP_URL: http://localhost:3000
+      ENABLE_DEV_ROUTES: "true"
+      USE_REAL_NODES: "false"
+      COOKIE_SECURE: "false"
+      EMAIL_PROVIDER: console
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Prepare the API
+        working-directory: backend
+        run: |
+          npm ci
+          npm run prisma:generate
+          PGPASSWORD=postgres psql -h localhost -U postgres -d tickvpn \
+            -v ON_ERROR_STOP=1 -v app_password=ci-password -v DBNAME=tickvpn \
+            -f prisma/sql/app_role.sql
+          npm run prisma:migrate
+          PGPASSWORD=postgres psql -h localhost -U postgres -d tickvpn \
+            -v ON_ERROR_STOP=1 -v app_password=ci-password -v DBNAME=tickvpn \
+            -f prisma/sql/app_role.sql
+          npm run seed
+
+      - name: Start the API
+        working-directory: backend
+        run: |
+          npm run dev > /tmp/api.log 2>&1 &
+          for i in $(seq 1 45); do
+            curl -sf http://localhost:3001/health > /dev/null && exit 0
+            sleep 1
+          done
+          echo "API never became healthy:"; cat /tmp/api.log; exit 1
+
+      - name: Build and start the frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npm run build
+          npm start > /tmp/web.log 2>&1 &
+          for i in $(seq 1 45); do
+            curl -sf http://localhost:3000/ > /dev/null && exit 0
+            sleep 1
+          done
+          echo "Frontend never came up:"; cat /tmp/web.log; exit 1
+
+      - name: Log in, pick a region, generate a config
+        working-directory: frontend
+        run: npm run test:ui
+
+      - name: Screenshots of every page
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: /tmp/tickvpn-shots
+          if-no-files-found: ignore
+
+      - name: Logs on failure
+        if: failure()
+        run: |
+          cat /tmp/api.log || true
+          cat /tmp/web.log || true
+
+  # ───────────────────────────────────────────────────────────────
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    env:
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Check for vulnerable dependencies
+        working-directory: frontend
+        run: npm audit --audit-level=moderate
+
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+
+      # next/font/google downloads at build time, so this step needs outbound
+      # access to fonts.googleapis.com. If you ever move CI behind a proxy that
+      # blocks it, switch to next/font/local rather than disabling the check.
+      - name: Build
+        working-directory: frontend
+        run: npm run build

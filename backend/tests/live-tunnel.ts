@@ -9,6 +9,7 @@
  * by moving lastBilledAt backwards — the same value the metering code reads.
  */
 import { execFileSync } from "child_process";
+import { existsSync, readFileSync } from "fs";
 import { Client } from "pg";
 
 const BASE = "http://localhost:3001";
@@ -16,14 +17,36 @@ const ADMIN =
   process.env.TEST_ADMIN_DATABASE_URL ?? "postgresql://postgres:password@localhost:5432/tickvpn";
 const pg = new Client({ connectionString: ADMIN });
 
-const SERVER_PUBKEY = execFileSync("cat", ["/tmp/s.pub"]).toString().trim();
-const CLIENT_PUBKEY = execFileSync("cat", ["/tmp/c.pub"]).toString().trim();
+/**
+ * The tunnel this test measures is built by tests/setup-local-wireguard.sh.
+ * Run that first (as root) — it creates wg0 in this namespace and a client in
+ * a network namespace, and writes the keys here.
+ */
+const KEY_DIR = process.env.TICKVPN_WG_KEY_DIR ?? "/tmp/tickvpn-wg";
+const NS = process.env.TICKVPN_WG_NS ?? "tickvpn-cli";
+const UNDERLAY_SERVER = "172.31.0.1:51820";
+
+function readKey(name: string): string {
+  const file = `${KEY_DIR}/${name}`;
+  if (!existsSync(file)) {
+    console.error(
+      `\nNo WireGuard test tunnel found (missing ${file}).\n` +
+        "Create one first:\n\n" +
+        "  sudo backend/tests/setup-local-wireguard.sh\n"
+    );
+    process.exit(2);
+  }
+  return readFileSync(file, "utf8").trim();
+}
+
+const SERVER_PUBKEY = readKey("server.pub");
+const CLIENT_PUBKEY = readKey("client.pub");
 
 const sh = (cmd: string, args: string[]) =>
   execFileSync(cmd, args, { encoding: "utf8", env: { ...process.env, PATH: `${process.env.PATH}:/usr/sbin` } });
 
 const wg = (...a: string[]) => sh("wg", a);
-const nsExec = (...a: string[]) => sh("ip", ["netns", "exec", "cli", ...a]);
+const nsExec = (...a: string[]) => sh("ip", ["netns", "exec", NS, ...a]);
 
 let cookie = "";
 let pass = 0;
@@ -45,6 +68,15 @@ async function api(path: string, method = "GET", body?: any) {
   const setC = res.headers.get("set-cookie");
   if (setC) cookie = setC.split(";")[0];
   return { status: res.status, json: (await res.json().catch(() => null)) as any };
+}
+
+/** The dump row for one specific peer — never assume ours is the only one. */
+function peerRow(publicKey: string): string[] | null {
+  const line = wg("show", "wg0", "dump")
+    .split("\n")
+    .slice(1)
+    .find((l) => l.split("\t")[0] === publicKey);
+  return line ? line.split("\t") : null;
 }
 
 /** wg0 peer list, as the agent sees it. */
@@ -110,7 +142,8 @@ function peersOnInterface(): string[] {
 
   // ── 3. start the agent; it should install the peer within one reconcile ──
   head("3  NODE AGENT RECONCILES THE PEER ONTO wg0");
-  check(peersOnInterface().length === 0, "wg0 starts with no peers");
+  check(!peersOnInterface().includes(CLIENT_PUBKEY), "our peer is not on wg0 yet",
+        `${peersOnInterface().length} unrelated peer(s) present`);
 
   const { spawn } = await import("child_process");
   const agent = spawn("python3", ["node-agent/agent.py"], {
@@ -136,7 +169,7 @@ function peersOnInterface(): string[] {
   // does this itself; here we force it so the test doesn't wait out the timer.
   nsExec("wg", "set", "wg1", "peer", SERVER_PUBKEY, "remove");
   nsExec("wg", "set", "wg1", "peer", SERVER_PUBKEY,
-         "endpoint", "172.31.0.1:51820", "allowed-ips", "10.8.0.0/24");
+         "endpoint", UNDERLAY_SERVER, "allowed-ips", "10.8.0.0/24");
   await sleep(500);
 
   // ── 4. carry real traffic, past the 5 MB qualifying threshold ──
@@ -151,7 +184,7 @@ while True:
 
   // Userspace WireGuard drops UDP under a blast, so send in paced rounds and
   // stop once the server side has actually received past the threshold.
-  const rxNow = () => Number(wg("show", "wg0", "dump").split("\n")[1].split("\t")[5] || 0);
+  const rxNow = () => Number(peerRow(CLIENT_PUBKEY)?.[5] ?? 0);
   for (let round = 0; round < 25 && rxNow() < 7 * 1024 * 1024; round++) {
     nsExec("python3", "-c",
       `import socket,time
@@ -163,10 +196,10 @@ for i in range(2000):
   }
   console.log(`  delivered ${(rxNow() / 1048576).toFixed(1)} MB through the tunnel`);
 
-  const dump = wg("show", "wg0", "dump").split("\n")[1].split("\t");
-  console.log(`  wg0 counters: handshake=${dump[4]}  rx=${dump[5]}  tx=${dump[6]}`);
-  check(Number(dump[5]) > 5 * 1024 * 1024, "peer moved more than the 5 MB qualifying threshold",
-        `${(Number(dump[5]) / 1048576).toFixed(1)} MB`);
+  const dump = peerRow(CLIENT_PUBKEY) ?? [];
+  console.log(`  our peer's wg0 counters: handshake=${dump[4]}  rx=${dump[5]}  tx=${dump[6]}`);
+  check(Number(dump[5] ?? 0) > 5 * 1024 * 1024, "peer moved more than the 5 MB qualifying threshold",
+        `${(Number(dump[5] ?? 0) / 1048576).toFixed(1)} MB`);
 
   await sleep(5000); // let the agent report it
   const dev = (await pg.query(`SELECT "qualifiedAt","cumulativeBytes" FROM "Device" WHERE "publicKey"=$1`, [CLIENT_PUBKEY])).rows[0];
@@ -202,12 +235,16 @@ for i in range(2000):
   const allowed = await fetch(`${BASE}/api/internal/nodes/${node.id}/peers`, {
     headers: { Authorization: `Bearer ${agentToken}` },
   }).then((r) => r.json() as any);
-  check(allowed.peers.length === 0, "zero-balance device left the authorised peer set");
+  // Scoped to THIS test's device: other accounts on this node may legitimately
+  // still be authorised, so an empty peer set is the wrong thing to assert.
+  const stillAllowed = allowed.peers.some((p: any) => p.publicKey === CLIENT_PUBKEY);
+  check(!stillAllowed, "zero-balance device left the authorised peer set",
+        `${allowed.peers.length} other peer(s) on this node remain authorised, correctly`);
 
   await sleep(6000); // one reconcile pass
   check(!peersOnInterface().includes(CLIENT_PUBKEY),
         "agent removed the peer from wg0 — the tunnel is gone",
-        `peers now on wg0: ${peersOnInterface().length}`);
+        `${peersOnInterface().length} peer(s) still on wg0, all belonging to other funded accounts`);
 
   // ── 8. top up and reconnect ──
   head("8  TOP UP AND RECONNECT");

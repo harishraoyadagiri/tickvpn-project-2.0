@@ -1,7 +1,20 @@
-/* Drives the real frontend in Chromium against the real backend. */
-const { chromium } = require("playwright");
+/**
+ * Drives the real frontend in Chromium against the real backend.
+ *
+ * This is the test that caught the release blocker: CORS was configured
+ * against the wrong origin, so every API call from the browser failed and the
+ * app was unusable while every server-side test still passed. Nothing but a
+ * real browser would have found it.
+ *
+ *   FE=http://localhost:3000  node tests/ui-smoke.mjs
+ */
+import { chromium } from "playwright";
+import { mkdirSync } from "fs";
 
-const FE = "http://localhost:3000";
+const FE = process.env.FE ?? "http://localhost:3000";
+const SHOTS = process.env.SHOTS_DIR ?? "/tmp/tickvpn-shots";
+mkdirSync(SHOTS, { recursive: true });
+
 const consoleErrors = [];
 const failedRequests = [];
 const netLog = [];
@@ -15,7 +28,12 @@ const head = (s) => console.log(`\n${"─".repeat(74)}\n${s}\n${"─".repeat(74)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {
-  const browser = await chromium.launch({ executablePath: "/opt/pw-browsers/chromium-1194/chrome-linux/chrome", args: ["--no-sandbox"] });
+  // CHROMIUM_PATH lets a sandboxed environment point at a preinstalled build;
+  // CI uses Playwright's own download.
+  const browser = await chromium.launch({
+    ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
+    args: ["--no-sandbox"],
+  });
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await ctx.newPage();
 
@@ -29,7 +47,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const title = await page.title();
   const h1 = await page.locator("h1").first().innerText().catch(() => "(none)");
   check(true, "landing page rendered", `title="${title}"  h1="${h1.replace(/\n/g, " ")}"`);
-  await page.screenshot({ path: "/tmp/shots/01-landing.png", fullPage: true });
+  await page.screenshot({ path: `${SHOTS}/01-landing.png`, fullPage: true });
 
   // does the landing page show pricing pulled from the API?
   const bodyText = await page.locator("body").innerText();
@@ -42,7 +60,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   netLog.length = 0; consoleErrors.length = 0; failedRequests.length = 0;
   await page.click('button:has-text("Continue")');
   await sleep(3000);
-  await page.screenshot({ path: "/tmp/shots/02-login.png", fullPage: true });
+  await page.screenshot({ path: `${SHOTS}/02-login.png`, fullPage: true });
 
   console.log("  network to backend:", netLog.length ? netLog.join(" | ") : "(nothing reached it)");
   if (failedRequests.length) console.log("  failed requests:", failedRequests.slice(0, 3).join(" | "));
@@ -67,7 +85,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.waitForURL("**/dashboard", { timeout: 15000 }).catch(() => {});
   await sleep(2500);
   check(page.url().includes("/dashboard"), "redirected to the dashboard", page.url());
-  await page.screenshot({ path: "/tmp/shots/03-dashboard.png", fullPage: true });
+  await page.screenshot({ path: `${SHOTS}/03-dashboard.png`, fullPage: true });
   const dash = await page.locator("body").innerText();
   console.log("  dashboard text:", dash.slice(0, 220).replace(/\n+/g, " | "));
 
@@ -79,7 +97,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await sleep(800);
   const pills = await page.locator(".region-pill").allInnerTexts();
   check(pills.length === 3, "all three regions render as choices", JSON.stringify(pills));
-  await page.screenshot({ path: "/tmp/shots/04-regions.png", fullPage: true });
+  await page.screenshot({ path: `${SHOTS}/04-regions.png`, fullPage: true });
 
   if (pills.length) {
     // pick the LAST region, so we prove the choice is actually honoured
@@ -89,7 +107,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     netLog.length = 0;
     await page.click('button:has-text("Generate & add")');
     await sleep(4000);
-    await page.screenshot({ path: "/tmp/shots/05-config.png", fullPage: true });
+    await page.screenshot({ path: `${SHOTS}/05-config.png`, fullPage: true });
     const after = await page.locator("body").innerText();
     console.log("  backend calls:", netLog.join(" | "));
 
@@ -117,7 +135,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const txt = await page.locator("body").innerText().catch(() => "");
     const broken = txt.includes("Application error") || txt.includes("Unhandled Runtime Error") || txt.trim().length < 40;
     check(!broken, `${name} page renders`, broken ? txt.slice(0, 140).replace(/\n/g, " ") : `${txt.length} chars`);
-    await page.screenshot({ path: `/tmp/shots/06-${name}.png`, fullPage: true });
+    await page.screenshot({ path: `${SHOTS}/06-${name}.png`, fullPage: true });
     if (consoleErrors.length) console.log(`    console errors on ${name}:`, consoleErrors.slice(0, 2).join(" | "));
   }
 
