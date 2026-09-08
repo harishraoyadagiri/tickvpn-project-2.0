@@ -57,8 +57,21 @@ export const env = {
 
   DATABASE_URL: required("DATABASE_URL"),
   PORT: integer("PORT", 3001),
-  /** The frontend's origin: Stripe redirect target and the sole allowed CORS origin. */
+  /**
+   * The public URL of the FRONTEND, not this API. Magic links, Stripe
+   * redirects and the default CORS allowlist are all built from it, so
+   * pointing it at this API's own port breaks sign-in three ways at once.
+   */
   APP_URL: optional("APP_URL", "http://localhost:3000"),
+
+  /**
+   * Browser origins allowed to call this API with credentials. Defaults to
+   * APP_URL alone; add staging or preview domains here. Never "*" — CORS
+   * forbids a wildcard with credentials, and reflecting arbitrary origins
+   * back alongside Allow-Credentials would let any site read a logged-in
+   * customer's wallet, devices and ledger.
+   */
+  CORS_ALLOWED_ORIGINS: list("CORS_ALLOWED_ORIGINS"),
 
   /** Dev/test endpoints that mint balance. Never reachable in production. */
   enableDevRoutes: devRoutesRequested && !isProduction,
@@ -103,6 +116,21 @@ export const env = {
 
   /** Cookies. Secure must be on anywhere that isn't plain-http local dev. */
   COOKIE_SECURE: optional("COOKIE_SECURE", isProduction ? "true" : "false") === "true",
+
+  /**
+   * "lax" is right when the frontend and this API share a registrable domain
+   * (app.tickvpn.com + api.tickvpn.com). If you deploy them to genuinely
+   * different sites — a Vercel preview URL calling a DigitalOcean API, say —
+   * the browser will not attach a Lax cookie to those requests at all and
+   * every logged-in call silently 401s. That case needs "none", which the
+   * browser only accepts on a Secure cookie.
+   */
+  COOKIE_SAMESITE: optional("COOKIE_SAMESITE", "lax") as "lax" | "none" | "strict",
+
+  /** The effective allowlist: the explicit list if given, otherwise APP_URL. */
+  get corsAllowedOrigins(): string[] {
+    return this.CORS_ALLOWED_ORIGINS.length > 0 ? this.CORS_ALLOWED_ORIGINS : [this.APP_URL];
+  },
 };
 
 /**
@@ -125,6 +153,46 @@ export function assertConfigValid(): void {
   if (env.EMAIL_PROVIDER === "smtp" && (!env.SMTP_USER || !env.SMTP_PASSWORD)) {
     problems.push("EMAIL_PROVIDER=smtp requires SMTP_USER and SMTP_PASSWORD");
   }
+  // APP_URL is the frontend. If it points at this API's own port, sign-in,
+  // Stripe redirects and CORS are all broken and the failure looks like a
+  // network error in the browser rather than a config mistake.
+  try {
+    const appUrl = new URL(env.APP_URL);
+    if (Number(appUrl.port || (appUrl.protocol === "https:" ? 443 : 80)) === env.PORT) {
+      problems.push(
+        `APP_URL (${env.APP_URL}) points at this API's own port ${env.PORT}. ` +
+          "It must be the frontend's URL — the browser origin that calls this API."
+      );
+    }
+    if (isProduction && appUrl.protocol !== "https:") {
+      problems.push("APP_URL must be https in production");
+    }
+  } catch {
+    problems.push(`APP_URL is not a valid URL: ${JSON.stringify(env.APP_URL)}`);
+  }
+
+  for (const origin of env.corsAllowedOrigins) {
+    if (origin === "*") {
+      problems.push("CORS_ALLOWED_ORIGINS cannot contain '*' — credentialed CORS forbids a wildcard");
+    } else {
+      try {
+        const u = new URL(origin);
+        if (u.origin !== origin) {
+          problems.push(`CORS_ALLOWED_ORIGINS entry must be a bare origin (scheme://host[:port]), got ${origin}`);
+        }
+      } catch {
+        problems.push(`CORS_ALLOWED_ORIGINS entry is not a valid origin: ${origin}`);
+      }
+    }
+  }
+
+  if (!["lax", "none", "strict"].includes(env.COOKIE_SAMESITE)) {
+    problems.push(`COOKIE_SAMESITE must be lax, none or strict (got ${env.COOKIE_SAMESITE})`);
+  }
+  if (env.COOKIE_SAMESITE === "none" && !env.COOKIE_SECURE) {
+    problems.push("COOKIE_SAMESITE=none requires COOKIE_SECURE=true — browsers reject it otherwise");
+  }
+
   if (!["console", "resend", "smtp"].includes(env.EMAIL_PROVIDER)) {
     problems.push(`EMAIL_PROVIDER must be console, resend or smtp (got ${env.EMAIL_PROVIDER})`);
   }
@@ -145,6 +213,9 @@ export function configSummary() {
     devRoutes: env.enableDevRoutes ? "ENABLED" : "disabled",
     nodes: env.useRealNodes ? "real" : "mock",
     stripe: env.STRIPE_SECRET_KEY ? "configured" : "not configured",
+    appUrl: env.APP_URL,
+    corsOrigins: env.corsAllowedOrigins.join(", "),
+    cookie: `sameSite=${env.COOKIE_SAMESITE} secure=${env.COOKIE_SECURE}`,
     email: env.EMAIL_PROVIDER + (env.EMAIL_ALLOWLIST.length ? ` (allowlist: ${env.EMAIL_ALLOWLIST.length})` : ""),
     qualifyingBytes: env.QUALIFYING_BYTES,
     handshakeFreshSeconds: env.HANDSHAKE_FRESH_SECONDS,

@@ -92,7 +92,7 @@ export function cookieOptions() {
   return {
     httpOnly: true,
     secure: env.COOKIE_SECURE,
-    sameSite: "lax" as const,
+    sameSite: env.COOKIE_SAMESITE,
     maxAge: env.SESSION_TTL_HOURS * 3_600_000,
     path: "/",
   };
