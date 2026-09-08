@@ -1,104 +1,124 @@
-#!/bin/bash
-# TickVPN — Node Agent installer. Paste this whole thing into the Droplet
-# Console and press Enter. Installs the agent that lets your backend add
-# and remove WireGuard peers automatically.
-set -e
+#!/usr/bin/env bash
+#
+# Installs the TickVPN node agent on a WireGuard droplet.
+#
+# Copy this directory to the node and run it as root:
+#
+#   scp -r backend/node-agent root@<droplet>:/opt/tickvpn-agent
+#   ssh root@<droplet>
+#   TICKVPN_API_URL=https://api.example.com \
+#   TICKVPN_NODE_ID=<node uuid> \
+#   TICKVPN_NODE_TOKEN=<token minted by the API> \
+#     bash /opt/tickvpn-agent/install-agent.sh
+#
+# The agent installed here is agent.py from this same directory — it is NOT
+# duplicated inline. An earlier version of this script carried its own copy of
+# the agent source, which silently went stale when the agent was rewritten and
+# would have deployed a version with an inbound HTTP port and a shared secret
+# long after that design was removed. One copy, one source of truth.
+#
+# The agent makes only outbound connections. It listens on nothing, so there is
+# no port to firewall and no credential on the wire except to your own API
+# over TLS.
+set -euo pipefail
 
-# EDIT THIS before pasting: must match NODE_SHARED_SECRET in your backend's
-# real .env file (not .env.example). Left as a placeholder here on purpose —
-# this file is checked into git, so a real secret must never be committed.
-NODE_SHARED_SECRET="__REPLACE_WITH_YOUR_NODE_SHARED_SECRET__"
+INSTALL_DIR=/opt/tickvpn-agent
+SERVICE=tickvpn-agent
+WG_INTERFACE="${TICKVPN_WG_INTERFACE:-wg0}"
+SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-cat > /root/agent.py << 'PYEOF'
-#!/usr/bin/env python3
-import subprocess
-import shlex
-import json
-import os
-from http.server import BaseHTTPRequestHandler, HTTPServer
+die() { echo "error: $*" >&2; exit 1; }
 
-SECRET = os.environ.get("NODE_SHARED_SECRET", "")
-PORT = 8787
+[[ "$(id -u)" == "0" ]] || die "run as root"
 
+for var in TICKVPN_API_URL TICKVPN_NODE_ID TICKVPN_NODE_TOKEN; do
+  [[ -n "${!var:-}" ]] || die "$var is required"
+done
 
-def run(cmd: str):
-    subprocess.run(cmd, shell=True, check=True)
+case "$TICKVPN_API_URL" in
+  https://*) ;;
+  http://localhost*|http://127.0.0.1*) echo "warning: plaintext API URL — local testing only" >&2 ;;
+  *) die "TICKVPN_API_URL must be https (the node token travels on it)" ;;
+esac
 
+[[ -f "$SOURCE_DIR/agent.py" ]] || die "agent.py not found next to this script"
+command -v wg >/dev/null || die "wireguard-tools is not installed"
+command -v python3 >/dev/null || die "python3 is not installed"
 
-class Handler(BaseHTTPRequestHandler):
-    def _authorized(self):
-        return SECRET != "" and self.headers.get("X-Node-Secret") == SECRET
+echo "==> installing agent to $INSTALL_DIR"
+install -d -m 755 "$INSTALL_DIR"
+install -m 755 "$SOURCE_DIR/agent.py" "$INSTALL_DIR/agent.py"
 
-    def _read_json(self):
-        length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length) if length else b"{}"
-        return json.loads(raw or b"{}")
+# The token lives in a root-only file rather than in the unit, because
+# `systemctl show` exposes Environment= values to any local user.
+echo "==> writing credentials to $INSTALL_DIR/agent.env (0600)"
+umask 077
+cat > "$INSTALL_DIR/agent.env" <<EOF
+TICKVPN_API_URL=$TICKVPN_API_URL
+TICKVPN_NODE_ID=$TICKVPN_NODE_ID
+TICKVPN_NODE_TOKEN=$TICKVPN_NODE_TOKEN
+TICKVPN_WG_INTERFACE=$WG_INTERFACE
+EOF
+chmod 600 "$INSTALL_DIR/agent.env"
 
-    def _respond(self, code, payload):
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(payload).encode())
-
-    def do_GET(self):
-        if self.path == "/health":
-            self._respond(200, {"ok": True})
-        else:
-            self._respond(404, {"error": "not found"})
-
-    def do_POST(self):
-        if not self._authorized():
-            return self._respond(403, {"error": "unauthorized"})
-        try:
-            if self.path == "/peers":
-                body = self._read_json()
-                pubkey = shlex.quote(body["publicKey"])
-                allowed_ip = shlex.quote(body["allowedIp"])
-                run(f"wg set wg0 peer {pubkey} allowed-ips {allowed_ip}")
-                run("wg-quick save wg0")
-                self._respond(200, {"ok": True})
-            elif self.path == "/peers/remove":
-                body = self._read_json()
-                pubkey = shlex.quote(body["publicKey"])
-                run(f"wg set wg0 peer {pubkey} remove")
-                run("wg-quick save wg0")
-                self._respond(200, {"ok": True})
-            else:
-                self._respond(404, {"error": "not found"})
-        except Exception as e:
-            self._respond(500, {"error": str(e)})
-
-    def log_message(self, format, *args):
-        pass
-
-
-if __name__ == "__main__":
-    if not SECRET:
-        print("WARNING: NODE_SHARED_SECRET is not set — all requests will be rejected.")
-    server = HTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"TickVPN node agent listening on :{PORT}")
-    server.serve_forever()
-PYEOF
-
-cat > /etc/systemd/system/tickvpn-agent.service << EOF
+echo "==> installing systemd unit"
+cat > "/etc/systemd/system/$SERVICE.service" <<EOF
 [Unit]
-Description=TickVPN Node Agent
-After=network.target wg-quick@wg0.service
+Description=TickVPN node agent
+After=network-online.target wg-quick@$WG_INTERFACE.service
+Wants=network-online.target
 
 [Service]
-Environment=NODE_SHARED_SECRET=${NODE_SHARED_SECRET}
-ExecStart=/usr/bin/python3 /root/agent.py
+Type=simple
+EnvironmentFile=$INSTALL_DIR/agent.env
+ExecStart=/usr/bin/python3 $INSTALL_DIR/agent.py
 Restart=always
+RestartSec=5
+
+# The agent only needs to run wg and talk to the API.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=$INSTALL_DIR
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable tickvpn-agent
-systemctl restart tickvpn-agent
+# Technical Decisions D8: block outbound mail from day one. A VPN node that can
+# send mail becomes a spam relay, and DigitalOcean de-platforms for that faster
+# than for anything else on the abuse list.
+if command -v nft >/dev/null; then
+  echo "==> blocking outbound SMTP (25, 465, 587)"
+  nft list table inet tickvpn >/dev/null 2>&1 || nft add table inet tickvpn
+  nft list chain inet tickvpn egress >/dev/null 2>&1 || \
+    nft add chain inet tickvpn egress '{ type filter hook forward priority 0; }'
+  nft add rule inet tickvpn egress tcp dport '{ 25, 465, 587 }' drop 2>/dev/null || true
+  nft add rule inet tickvpn egress udp dport '{ 25, 465, 587 }' drop 2>/dev/null || true
+  echo "    (make these persistent with nftables.conf — this run is not saved)"
+else
+  echo "warning: nft not found — outbound SMTP is NOT blocked. Install nftables." >&2
+fi
 
-echo "=================================================="
-echo "Agent installed. Test it with:"
-echo "curl localhost:8787/health"
-echo "=================================================="
+echo "==> starting $SERVICE"
+systemctl daemon-reload
+systemctl enable "$SERVICE" >/dev/null
+systemctl restart "$SERVICE"
+sleep 2
+
+if systemctl is-active --quiet "$SERVICE"; then
+  echo
+  echo "Agent is running. It reports every 10s and reconciles peers every 15s."
+  echo "  journalctl -u $SERVICE -f     # follow"
+  echo "  wg show $WG_INTERFACE         # peers the control plane has authorised"
+else
+  echo
+  echo "Agent failed to start:" >&2
+  journalctl -u "$SERVICE" -n 30 --no-pager >&2
+  exit 1
+fi
