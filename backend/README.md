@@ -63,12 +63,19 @@ header of that file. `regressions.ts` needs only the server and the database.
 ## Installing a node
 
 ```bash
-# on the droplet, after WireGuard is up
-sudo TICKVPN_API_URL=https://api.example.com \
-     TICKVPN_NODE_ID=<node uuid> \
-     TICKVPN_NODE_TOKEN=<minted token> \
-     bash node-agent/install-agent.sh
+# copy the agent to the droplet, then run the installer there
+scp -r backend/node-agent root@<droplet>:/opt/tickvpn-agent
+ssh root@<droplet>
+
+TICKVPN_API_URL=https://api.example.com \
+TICKVPN_NODE_ID=<node uuid> \
+TICKVPN_NODE_TOKEN=<minted token> \
+  bash /opt/tickvpn-agent/install-agent.sh
 ```
+
+The agent is outbound-only: it reports what WireGuard sees every 10s and pulls
+the authorised peer set every 15s. It listens on nothing, so there is no port
+to expose and no credential on the wire except to your own API over TLS.
 
 Mint the token with `POST /dev/nodes/:nodeId/token` in development, or the admin
 equivalent once that exists. It is shown once and stored only as a SHA-256 hash.
