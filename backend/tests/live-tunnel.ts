@@ -12,7 +12,8 @@ import { execFileSync } from "child_process";
 import { Client } from "pg";
 
 const BASE = "http://localhost:3001";
-const ADMIN = "postgresql://postgres:password@localhost:5432/tickvpn";
+const ADMIN =
+  process.env.TEST_ADMIN_DATABASE_URL ?? "postgresql://postgres:password@localhost:5432/tickvpn";
 const pg = new Client({ connectionString: ADMIN });
 
 const SERVER_PUBKEY = execFileSync("cat", ["/tmp/s.pub"]).toString().trim();

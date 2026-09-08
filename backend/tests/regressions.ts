@@ -5,7 +5,11 @@ import { Client } from "pg";
 import Stripe from "stripe";
 
 const BASE = "http://localhost:3001";
-const pg = new Client({ connectionString: "postgresql://postgres:password@localhost:5432/tickvpn" });
+// Admin connection: these harnesses assert on grants and constraints, so they
+// connect as a superuser rather than as the application role.
+const ADMIN_URL =
+  process.env.TEST_ADMIN_DATABASE_URL ?? "postgresql://postgres:password@localhost:5432/tickvpn";
+const pg = new Client({ connectionString: ADMIN_URL });
 
 let pass = 0, fail = 0;
 const check = (c: boolean, id: string, label: string, detail = "") => {
@@ -147,10 +151,57 @@ const KEY_A = genKey();
 
   head("MEDIUM");
 
-  // M2 — bandwidth actually recorded
-  const bytes = (await pg.query(
-    `SELECT COALESCE(SUM("cumulativeBytes"),0)::bigint AS b FROM "Device" WHERE "cumulativeBytes" > 0`)).rows[0].b;
-  check(Number(bytes) > 0, "M2", "byte counters are actually written", `${(Number(bytes) / 1048576).toFixed(1)} MB recorded`);
+  // M2 — a node report is actually turned into byte counters and billing.
+  // Self-contained: provisions a device, mints a node token, posts a synthetic
+  // report, and asserts the control plane recorded it. No dependency on
+  // live-tunnel.ts having run first.
+  const metered = await newUser();
+  await metered.call("/dev/credit-day", "POST", { days: 1 });
+  const meterKey = genKey();
+  const provisioned = await metered.call("/vpn/provision", "POST", {
+    regionCode: "us", devicePublicKey: meterKey, deviceName: "metering probe",
+  });
+  const meterNodeId = (await pg.query(
+    `SELECT "nodeId" FROM "Device" WHERE "publicKey"=$1`, [meterKey])).rows[0].nodeId;
+  const nodeTok = await metered.call(`/dev/nodes/${meterNodeId}/token`, "POST");
+  const report = async (rx: number, handshakeAgoSeconds = 5) =>
+    fetch(`${BASE}/api/internal/nodes/${meterNodeId}/report`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${nodeTok.json.agentToken}` },
+      body: JSON.stringify({
+        peers: [{
+          publicKey: meterKey,
+          latestHandshake: Math.floor(Date.now() / 1000) - handshakeAgoSeconds,
+          rxBytes: rx, txBytes: 1024,
+        }],
+      }),
+    }).then((r) => r.json() as any);
+
+  await report(6 * 1024 * 1024); // past the 5 MB qualifying threshold
+  const meterDev = (await pg.query(
+    `SELECT "cumulativeBytes","qualifiedAt" FROM "Device" WHERE "publicKey"=$1`, [meterKey])).rows[0];
+  check(Number(meterDev.cumulativeBytes) > 5 * 1024 * 1024 && meterDev.qualifiedAt !== null, "M2",
+        "a node report records bytes and classifies qualifying usage",
+        `${(Number(meterDev.cumulativeBytes) / 1048576).toFixed(1)} MB, qualified=${meterDev.qualifiedAt !== null}`);
+
+  // and that connected time actually comes off the day
+  await pg.query(`UPDATE "TimeSession" SET "lastBilledAt" = "lastBilledAt" - interval '9 minutes'
+                  WHERE "userId"=$1 AND status='ACTIVE'`, [metered.uid]);
+  await report(7 * 1024 * 1024);
+  const meterBal = (await metered.call("/wallet")).json;
+  check(meterBal.minuteBalance === 1440 - 9, "M2b",
+        "9 minutes connected deducts 9 minutes from the day",
+        `1440 -> ${meterBal.minuteBalance} (${meterBal.daysRemaining} days)`);
+
+  // a stale handshake must not bill, however many bytes are reported
+  const before = (await metered.call("/wallet")).json.minuteBalance;
+  await pg.query(`UPDATE "TimeSession" SET "lastBilledAt" = "lastBilledAt" - interval '30 minutes'
+                  WHERE "userId"=$1 AND status='ACTIVE'`, [metered.uid]);
+  await report(20 * 1024 * 1024, 9999); // handshake far outside the freshness window
+  const after2 = (await metered.call("/wallet")).json.minuteBalance;
+  check(after2 === before, "M2c",
+        "a stale handshake bills nothing, however many bytes are reported",
+        `balance ${before} -> ${after2}`);
 
   // M3 — per-node addresses
   const dupe = (await pg.query(
