@@ -261,7 +261,7 @@ export function apiRouter(prisma: PrismaClient) {
   );
 
   // ─────────────────────── Content discovery ───────────────────────
-  // V1 scope per content-discovery-scope.md is "in-app, logged-in only";
+  // V1 scope per docs/content-discovery-scope.md is "in-app, logged-in only";
   // the public pre-login surface is a V2 item pending a legal review.
 
   router.get(

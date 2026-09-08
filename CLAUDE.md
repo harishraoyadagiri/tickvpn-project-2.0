@@ -44,16 +44,45 @@ row in an append-only ledger.
 
 ## Commands
 
+Run these from `backend/`:
+
 ```bash
-npm run dev               # server on :3001
+npm run dev               # API on :3001
 npm run prisma:migrate    # apply migrations (never --name init again)
 npm run seed              # products, regions, local node
-npm test                  # vitest
-npm run test:concurrency  # the 200-iteration parallel consume test
+npm test                  # 18 regression checks — needs the API and database up
+npm run test:keys         # 500 real `wg genkey` keys through the validator
+npm run test:tunnel       # the full journey against a real WireGuard tunnel
+npm run typecheck
 ```
+
+From `frontend/`:
+
+```bash
+npm run dev               # web on :3000
+npm run test:ui           # Playwright — needs both the API and the web app up
+```
+
+CI runs the regression suite **three times** per push. That is deliberate: the
+bugs that matter here are probabilistic, and the key-validator bug that shipped
+to `main` was invisible on a single run and only appeared on the fifth.
 
 ## Things that are deliberately not done yet
 
-- Stripe underwriting, live keys, and the checkout redirect.
-- Email delivery of magic links (tokens are logged in dev only).
-- Terraform, real droplets, admin portal, monitoring.
+- Stripe underwriting and live keys (the code path, webhook handling and
+  de-duplication are all built and tested).
+- Terraform, real droplets, the admin portal, monitoring, the retention purge.
+
+Everything left is stepped out in [`docs/GO-LIVE.md`](docs/GO-LIVE.md), with the
+reasoning behind the ordering in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
+## Two traps that have already cost time
+
+- **Do not use `next/font/google`.** It downloads typefaces at build time, so
+  any network restriction turns into a confusing build failure. System stacks
+  are set in `frontend/app/layout.tsx`; use `next/font/local` if you need a
+  custom face.
+- **Do not tighten `script-src` in `frontend/next.config.ts` without reading the
+  comment above it.** Removing `'unsafe-inline'` breaks React hydration
+  silently, and only in a production build — every button stops working and
+  nothing in the UI says why.

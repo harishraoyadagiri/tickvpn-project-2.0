@@ -4,21 +4,36 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 const isDev = process.env.NODE_ENV !== "production";
 
 /**
- * Security headers.
+ * Content-Security-Policy.
  *
- * The dashboard shows a wallet balance, a device list and a ledger, and has
- * one-click Revoke buttons — so framing protection is not decoration. A page
- * that can be put in an invisible iframe is a page whose buttons can be
- * clicked by someone else's site.
+ * `script-src` allows 'unsafe-inline', and that is a deliberate decision
+ * rather than an oversight. Next.js emits an inline bootstrap script to
+ * hydrate the page. Blocking it does not degrade the site — it breaks it
+ * completely and silently: React never hydrates, every button stops working,
+ * and nothing appears in the UI to say why. It only shows up in a production
+ * build, never in `next dev`.
  *
- * The CSP is deliberately tight: no plugins, no framing, no base-tag
- * hijacking, and connections only to this app and its own API. Next.js needs
- * 'unsafe-inline' for styles, and in development it also needs 'unsafe-eval'
- * plus a websocket for hot reload — neither is allowed in a production build.
+ * The correct fix is a per-request nonce from middleware. That was tried and
+ * removed: a nonce cannot match the inline script inside a statically
+ * prerendered page, because that HTML was generated at build time. Making it
+ * work means forcing every page to render dynamically, which is a real cost
+ * for an app that has no HTML-injection surface at all — nothing here renders
+ * user-supplied markup, there is no dangerouslySetInnerHTML anywhere, and
+ * React escapes everything else.
+ *
+ * The directives that actually defend this app are all still strict:
+ *   frame-ancestors 'none'   the dashboard has one-click Revoke buttons
+ *   connect-src              exfiltration can only target our own API
+ *   object-src 'none'        no plugins
+ *   base-uri 'self'          no <base> hijacking of relative script URLs
+ *   form-action 'self'       no posting credentials to someone else's server
+ *
+ * If a feature ever renders user-supplied HTML, revisit this: force dynamic
+ * rendering and switch to a nonce before that feature ships.
  */
 const csp = [
   "default-src 'self'",
-  `script-src 'self'${isDev ? " 'unsafe-eval' 'unsafe-inline'" : ""}`,
+  `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",

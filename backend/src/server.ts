@@ -1,4 +1,3 @@
-import path from "path";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -74,13 +73,6 @@ app.use(internalRouter(prisma)); // node agents, bearer-token authenticated
 app.use(checkoutRouter(prisma));
 app.use(apiRouter(prisma));
 app.use(devRouter(prisma)); // empty router unless ENABLE_DEV_ROUTES=true
-
-// The legacy single-file test app in public/. It predates the Next.js
-// frontend and is not maintained; serving it in production would put an
-// unreviewed UI on the API's own origin, so it is development-only.
-if (!env.isProduction) {
-  app.use(express.static(path.join(__dirname, "..", "public")));
-}
 
 // Must be last: turns a thrown error into a response instead of a hung socket.
 app.use(errorHandler);

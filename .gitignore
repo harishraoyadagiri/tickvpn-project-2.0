@@ -1,11 +1,27 @@
+# dependencies
 node_modules/
+
+# builds
 dist/
+.next/
+out/
+*.tsbuildinfo
+
+# secrets and local config — never commit these
 .env
-.env.local
+.env.*
+!.env.example
+
+# logs and local scratch
 *.log
+backend/server-status.txt
+
+# test output
+/tmp/tickvpn-shots/
+tickvpn-shots/
+
+# editors / OS
 .DS_Store
 Thumbs.db
-
-# Runtime heartbeat file the dev server overwrites on every start/crash —
-# not real project content.
-backend/server-status.txt
+.idea/
+.vscode/

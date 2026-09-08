@@ -1,5 +1,5 @@
 /**
- * TickVPN pricing model — see /docs/tickvpn-pricing-model.md for the full
+ * TickVPN pricing model — see /docs/pricing-model.md for the full
  * writeup (formula derivation, market positioning, admin override spec).
  *
  * Every Tick Pass is priced off one power-curve formula, calibrated to a

@@ -53,12 +53,21 @@ disabling a security control, and prints the switches that change behaviour.
 ## Tests
 
 ```bash
-npx ts-node tests/live-tunnel.ts   # full journey against a real WireGuard tunnel
-npx ts-node tests/regressions.ts   # one test per audit finding
+npm test               # 18 regression checks — needs the server and database
+npm run test:keys      # 500 real `wg genkey` keys through the validator
+npm run test:tunnel    # full journey against a real WireGuard tunnel
 ```
 
-`live-tunnel.ts` needs a real `wg0` and a client in a network namespace; see the
-header of that file. `regressions.ts` needs only the server and the database.
+`test:tunnel` needs a real `wg0` and a client in a network namespace. A script
+builds both:
+
+```bash
+sudo tests/setup-local-wireguard.sh
+npm run test:tunnel
+sudo tests/setup-local-wireguard.sh teardown
+```
+
+It needs Linux. On Windows use WSL2, or let CI run it — it does, on every push.
 
 ## Installing a node
 
@@ -82,6 +91,11 @@ equivalent once that exists. It is shown once and stored only as a SHA-256 hash.
 
 ## What is deliberately not built yet
 
-Stripe underwriting and live keys; email delivery of magic links (tokens are
-logged in development only); Terraform; the admin portal; monitoring; the
-retention purge job.
+Stripe underwriting and live keys; Terraform; the admin portal; monitoring; the
+retention purge job. All of it stepped out in
+[`../docs/GO-LIVE.md`](../docs/GO-LIVE.md).
+
+Magic-link delivery **is** built — `EMAIL_PROVIDER` selects `console` (prints
+the link, sends nothing; refused in production), `resend`, or `smtp`. The link
+carries the token in the URL **fragment**, so a corporate mail scanner that
+follows links cannot burn it before the customer clicks.

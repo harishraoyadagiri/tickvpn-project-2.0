@@ -349,9 +349,11 @@ jobs:
         working-directory: frontend
         run: npm run lint
 
-      # next/font/google downloads at build time, so this step needs outbound
-      # access to fonts.googleapis.com. If you ever move CI behind a proxy that
-      # blocks it, switch to next/font/local rather than disabling the check.
+      # This build needs no outbound network. `next/font/google` was removed
+      # deliberately: it fetches from fonts.googleapis.com at build time, so any
+      # network restriction turns into a confusing build failure. The app uses
+      # system font stacks instead. If you ever want a custom face, use
+      # next/font/local with the file committed — never next/font/google.
       - name: Build
         working-directory: frontend
         run: npm run build

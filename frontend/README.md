@@ -1,36 +1,71 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# TickVPN — web app
 
-## Getting Started
+Next.js 16 (App Router). Landing page, passwordless login, and a four-page
+dashboard. Client components throughout: the API is the source of truth, and
+there is no server-side session to render from.
 
-First, run the development server:
+## Running it
+
+Needs the API on `:3001` first — see the [root README](../README.md).
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+echo "NEXT_PUBLIC_API_URL=http://localhost:3001" > .env.local
+npm run dev          # http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+`NEXT_PUBLIC_API_URL` is the only variable. In production it points at
+`https://api.yourdomain.com`, and the same value must appear in the API's
+`CORS_ALLOWED_ORIGINS` from the other direction.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Layout
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```
+app/
+  page.tsx              Landing page and pricing
+  login/                Magic-link request and token entry
+  dashboard/            Connect, devices, billing, discover
+components/             Logo, pricing curve
+lib/
+  api.ts                Fetch wrapper — always credentialed
+  wireguard.ts          Keypair generation, in the browser
+  useAuth.ts            Probes GET /wallet; 401 redirects to /login
+tests/ui-smoke.mjs      Playwright: login → region → config download
+```
 
-## Learn More
+## Two things worth knowing before you change anything
 
-To learn more about Next.js, take a look at the following resources:
+**Private keys are generated here and never leave the browser.**
+`lib/wireguard.ts` uses tweetnacl's Curve25519. Only the public key is sent to
+the API; the private key goes into the `.conf` the customer downloads and into
+this browser's local storage so the config can be shown again. Do not add an
+endpoint that accepts one.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+**The auth check is convenience, not security.** `useAuth` probing `/wallet` and
+redirecting on 401 makes the UI behave; every route enforces its own
+authorization server-side. Never treat a hidden button as a control.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Fonts
 
-## Deploy on Vercel
+System font stacks, set in `app/layout.tsx`. `next/font/google` was removed on
+purpose — it downloads typefaces at build time, so any network restriction turns
+into a confusing build failure. If you want a custom face, self-host it with
+`next/font/local` and commit the file.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Security headers
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+All of them live in `next.config.ts`, including the CSP. The comment there
+explains why `script-src` allows `'unsafe-inline'` and what would have to change
+to remove it. Read it before tightening the policy — a stricter value breaks
+hydration silently, and only in a production build.
+
+## Tests
+
+```bash
+npm run test:ui      # needs the API and the web app both running
+```
+
+Drives a real Chromium through login, the dashboard, all three regions and
+config generation. It is the only test that catches a CORS or cookie
+misconfiguration; the server-side suite once passed completely while the app was
+unusable in a browser.

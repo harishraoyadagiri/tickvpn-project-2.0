@@ -1,6 +1,6 @@
 /**
  * Content discovery — trending Netflix titles + top iOS apps, by region.
- * See /content-discovery-scope.md for the full scope doc (V1 vs V2 split).
+ * See /docs/content-discovery-scope.md for the full scope doc (V1 vs V2 split).
  *
  * V1 sources, both official/free per the doc:
  *  - Apple's official App Store RSS feed (rss.marketingtools.apple.com) —
