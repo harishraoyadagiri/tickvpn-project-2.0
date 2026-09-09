@@ -47,9 +47,10 @@ jobs:
       PORT: "3001"
       APP_URL: http://localhost:3000
       ENABLE_DEV_ROUTES: "true"
-      USE_REAL_NODES: "false"
       COOKIE_SECURE: "false"
       EMAIL_PROVIDER: console
+      # No droplets in CI; mark the seeded stand-ins usable so the flow runs.
+      SEED_LOCAL_NODES: "true"
       # Must match the secret tests/regressions.ts signs its webhooks with.
       STRIPE_WEBHOOK_SECRET: whsec_regression
 
@@ -164,9 +165,10 @@ jobs:
       PORT: "3001"
       APP_URL: http://localhost:3000
       ENABLE_DEV_ROUTES: "true"
-      USE_REAL_NODES: "false"
       COOKIE_SECURE: "false"
       EMAIL_PROVIDER: console
+      # No droplets in CI; mark the seeded stand-ins usable so the flow runs.
+      SEED_LOCAL_NODES: "true"
 
     steps:
       - uses: actions/checkout@v4
@@ -254,9 +256,10 @@ jobs:
       PORT: "3001"
       APP_URL: http://localhost:3000
       ENABLE_DEV_ROUTES: "true"
-      USE_REAL_NODES: "false"
       COOKIE_SECURE: "false"
       EMAIL_PROVIDER: console
+      # No droplets in CI; mark the seeded stand-ins usable so the flow runs.
+      SEED_LOCAL_NODES: "true"
       NEXT_PUBLIC_API_URL: http://localhost:3001
 
     steps:

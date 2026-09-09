@@ -95,7 +95,10 @@ function peersOnInterface(): string[] {
   head("0  WIRE THE 'us' REGION TO THE REAL WIREGUARD INTERFACE");
   const node = (
     await pg.query(
-      `UPDATE "VPNNode" n SET "publicIp"='127.0.0.1', "publicKey"=$1, "subnetBase"='10.8.0'
+      // status too: this node now points at a real interface with a real key,
+      // which is exactly what HEALTHY means. Seeded stand-ins are OFFLINE so
+      // they can't hand out configs that could never handshake.
+      `UPDATE "VPNNode" n SET "publicIp"='127.0.0.1', "publicKey"=$1, "subnetBase"='10.8.0', status='HEALTHY'
        FROM "Region" r WHERE r.id = n."regionId" AND r.code='us' RETURNING n.id, n.hostname`,
       [SERVER_PUBKEY]
     )

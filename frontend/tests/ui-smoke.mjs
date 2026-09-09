@@ -124,10 +124,38 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const devText = await page.locator(".device-row").last().innerText().catch(() => "");
     check(devText.includes(chosen), `the device is on the region I picked (${chosen})`,
           devText.replace(/\n/g, " "));
+
+    // G4 — the QR code is the whole phone-onboarding path. A .conf download on
+    // a phone means typing a 44-character base64 private key by hand.
+    const qrCanvas = page.locator(".qr-frame canvas");
+    const drawn = await qrCanvas.evaluate(
+      (c) => c.width > 0 && c.height > 0 &&
+             c.getContext("2d").getImageData(0, 0, c.width, c.height).data.some((v, i) => i % 4 !== 3 && v !== 0),
+    ).catch(() => false);
+    check(drawn, "the config renders as a scannable QR code", drawn ? "canvas has modules drawn" : "blank or missing");
+
+    // It encodes a private key, so it must not be legible until asked for.
+    const covered = await page.locator(".qr-frame:not(.revealed) .qr-cover").isVisible().catch(() => false);
+    await page.locator(".qr-cover").click().catch(() => {});
+    const uncovered = await page.locator(".qr-frame.revealed").isVisible().catch(() => false);
+    check(covered && uncovered, "the QR is covered until you ask for it",
+          `covered=${covered}, reveals=${uncovered}`);
+    await page.screenshot({ path: `${SHOTS}/05b-qr.png`, fullPage: true });
   }
 
-  // ─────────── other pages ───────────
-  head("5  REMAINING PAGES");
+  // ── G3 — backing out of a payment used to land on /pricing, a 404 ─────────
+  head("5  RETURNING FROM STRIPE");
+  await page.goto(FE + "/dashboard/billing?purchase=cancelled", { waitUntil: "networkidle" });
+  const cancelBanner = await page.locator(".purchase-banner").innerText().catch(() => "");
+  check(/cancel/i.test(cancelBanner) && !/404|not found/i.test(await page.locator("body").innerText()),
+        "a cancelled checkout lands on a real page that says so",
+        cancelBanner.replace(/\n/g, " ").slice(0, 70));
+
+  // The banner must clear itself from the URL, or a refresh replays it.
+  const cleaned = !page.url().includes("purchase=");
+  check(cleaned, "the return banner clears its own query string", page.url());
+
+  head("6  REMAINING PAGES");
   for (const [path, name] of [["/dashboard/billing", "billing"], ["/dashboard/discover", "discover"]]) {
     consoleErrors.length = 0;
     await page.goto(FE + path, { waitUntil: "networkidle" }).catch(() => {});

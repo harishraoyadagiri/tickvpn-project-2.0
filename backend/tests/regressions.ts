@@ -236,6 +236,73 @@ const KEY_A = genKey();
   const anonContent = await fetch(BASE + "/content/trending?region=us").then((r) => r.status);
   check(anonContent === 401, "M11", "content discovery is logged-in only", `anonymous got ${anonContent}`);
 
+  // ── G8 — a region with no usable node must refuse, not issue a dead config ──
+  //
+  // The seed registers one node per region so the menu is complete before the
+  // droplets are. Those stand-ins hold a public key no machine has. Handing a
+  // customer a config built from one produces a .conf that downloads, a QR that
+  // scans, and a tunnel that never comes up — with nothing logged anywhere.
+  // During a staged rollout (one real droplet, two stand-ins) that is exactly
+  // what a tester hits by picking the wrong region.
+  const offlineUser = await newUser();
+  await pg.query(`UPDATE "VPNNode" n SET status='OFFLINE'
+                  FROM "Region" r WHERE r.id = n."regionId" AND r.code='eu'`);
+  const deadRegion = await offlineUser.call("/vpn/provision", "POST", {
+    regionCode: "eu", devicePublicKey: genKey(), deviceName: "should not provision",
+  });
+  check(deadRegion.status === 503 && deadRegion.json?.error === "no_capacity", "G8a",
+        "a region with no usable node refuses instead of issuing a dead config",
+        `${deadRegion.status} ${deadRegion.json?.error ?? JSON.stringify(deadRegion.json)}`);
+
+  await pg.query(`UPDATE "VPNNode" n SET status='HEALTHY'
+                  FROM "Region" r WHERE r.id = n."regionId" AND r.code='eu'`);
+  const liveRegion = await offlineUser.call("/vpn/provision", "POST", {
+    regionCode: "eu", devicePublicKey: genKey(), deviceName: "eu device",
+  });
+  check(liveRegion.status === 200, "G8b",
+        "the same region provisions once a node is marked healthy",
+        `${liveRegion.status} ${liveRegion.json?.config?.serverEndpoint ?? ""}`);
+
+  // ── G1 — a node token can be minted without any HTTP surface ─────────────
+  //
+  // POST /dev/nodes/:id/token is dev-gated, and correctly so: it mints a
+  // credential that controls a node's peer set. But that left a deployed API
+  // with no way at all to authorise its own droplet. scripts/node-token.ts
+  // closes that, and these checks prove the token it prints is real — not just
+  // that the script exits 0.
+  const nodeRow = (await pg.query(
+    `SELECT id FROM "VPNNode" ORDER BY "hostname" LIMIT 1`)).rows[0];
+
+  const mintToken = (): string => {
+    const out = execSync("npx ts-node scripts/node-token.ts " + nodeRow.id, {
+      encoding: "utf8", cwd: process.cwd(), env: process.env,
+    });
+    const m = /TICKVPN_NODE_TOKEN=(\S+)/.exec(out);
+    if (!m) throw new Error("node-token.ts printed no token:\n" + out);
+    return m[1];
+  };
+
+  const peersWith = async (token: string) =>
+    (await fetch(`${BASE}/api/internal/nodes/${nodeRow.id}/peers`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })).status;
+
+  const firstToken = mintToken();
+  check(await peersWith(firstToken) === 200, "G1a",
+        "a token minted by the CLI authenticates against the node control plane");
+
+  check(await peersWith(firstToken + "x") === 403, "G1b",
+        "a tampered token is rejected");
+
+  // Re-minting is how you rotate a node whose token leaked. If the old one kept
+  // working, rotation would be theatre.
+  const secondToken = mintToken();
+  const oldAfterRotate = await peersWith(firstToken);
+  const newAfterRotate = await peersWith(secondToken);
+  check(oldAfterRotate === 403 && newAfterRotate === 200, "G1c",
+        "re-minting rotates: the previous token stops working immediately",
+        `old=${oldAfterRotate}, new=${newAfterRotate}`);
+
   head(`RESULT: ${pass} passed, ${fail} failed`);
   await pg.end();
   process.exit(fail === 0 ? 0 : 1);

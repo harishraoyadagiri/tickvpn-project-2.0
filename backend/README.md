@@ -41,7 +41,7 @@ cp .env.example .env        # point DATABASE_URL at tickvpn_app
 npm install
 npm run prisma:generate
 npm run prisma:migrate
-npm run seed
+SEED_LOCAL_NODES=true npm run seed   # marks the stand-in nodes selectable
 
 # 4. go
 npm run dev                 # http://localhost:3001
@@ -86,8 +86,21 @@ The agent is outbound-only: it reports what WireGuard sees every 10s and pulls
 the authorised peer set every 15s. It listens on nothing, so there is no port
 to expose and no credential on the wire except to your own API over TLS.
 
-Mint the token with `POST /dev/nodes/:nodeId/token` in development, or the admin
-equivalent once that exists. It is shown once and stored only as a SHA-256 hash.
+Mint the token with `npm run node:token -- <nodeId|hostname>`. It is shown once
+and stored only as a SHA-256 hash, so a lost token is re-minted rather than
+recovered — and re-minting immediately invalidates the previous one, which is
+how you rotate a node you no longer trust.
+
+This is a script rather than a route on purpose. `POST /dev/nodes/:id/token`
+still exists for local work, but it is dev-gated, so a deployed API has no
+endpoint that mints node credentials at all. The script needs shell access to
+something holding `DATABASE_URL`, which is a much higher bar than reaching
+port 443, and it leaves nothing behind when it exits.
+
+```bash
+npm run node:token -- --list        # every node, and whether it has a token yet
+npm run node:token -- us-node-1     # mint or rotate
+```
 
 ## What is deliberately not built yet
 

@@ -1140,3 +1140,87 @@ footer .flinks a:hover {
     display: none;
   }
 }
+
+/* Coming back from Stripe. The tone tracks the outcome rather than the
+   presence of a message, so a cancelled checkout doesn't read as an error. */
+.purchase-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 13px 14px 13px 16px;
+  margin-bottom: 16px;
+  border: 1px solid var(--line-strong);
+  border-left-width: 3px;
+  border-radius: 6px;
+  background: rgba(245, 243, 234, 0.04);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.purchase-banner .pb-body {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+}
+.purchase-banner strong { font-weight: 600; }
+.purchase-banner.ok { border-left-color: var(--mint); }
+.purchase-banner.bad { border-left-color: var(--coral); }
+.purchase-banner.neutral { border-left-color: var(--yellow); }
+.purchase-banner .pb-dismiss {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.purchase-banner .pb-dismiss:hover { color: var(--paper); }
+
+/* WireGuard config QR. Covered by default: the code encodes a private key, and
+   a screen-share or a shoulder is enough to copy it. */
+.qr-panel {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  margin: 14px 0;
+}
+.qr-frame {
+  position: relative;
+  width: 208px;
+  height: 208px;
+  flex: 0 0 auto;
+  background: var(--paper);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.qr-frame canvas { display: block; width: 208px; height: 208px; }
+.qr-frame:not(.revealed) canvas { filter: blur(9px); }
+.qr-cover {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 0;
+  cursor: pointer;
+  background: rgba(11, 15, 26, 0.72);
+  color: var(--paper);
+  font: inherit;
+}
+.qr-cover-label { font-size: 13px; font-weight: 600; }
+.qr-cover-sub { font-size: 11px; color: var(--muted); }
+.qr-help {
+  flex: 1 1 260px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.qr-help strong { display: block; color: var(--paper); margin-bottom: 6px; font-size: 13.5px; }
+.qr-help ol { margin: 0 0 10px; padding-left: 1.2em; }
+.qr-help li { margin-bottom: 3px; }
+.qr-help p { margin: 0; font-size: 12px; }
+.qr-fallback { font-size: 13px; color: var(--coral); line-height: 1.5; }

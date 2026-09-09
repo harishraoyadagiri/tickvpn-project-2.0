@@ -121,6 +121,15 @@ export interface Product {
   sortOrder: number;
 }
 
+export interface Purchase {
+  id: string;
+  status: "PENDING" | "PAID" | "FAILED" | "REFUNDED";
+  amountCents: number;
+  productName: string;
+  minutes: number;
+  createdAt: string;
+}
+
 export interface PricingModel {
   baseRate: number;
   decayExp: number;

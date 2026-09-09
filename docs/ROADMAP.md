@@ -202,7 +202,7 @@ cd infra/terraform && terraform apply
 #   hostname, publicIp, publicKey (from `wg show wg0 public-key`), region
 
 # mint its agent token — shown once, stored only as a SHA-256 hash
-curl -X POST https://api.yourdomain.com/dev/nodes/<node-id>/token
+npm --prefix backend run node:token -- <hostname>
 
 # install the agent
 scp -r backend/node-agent root@<droplet>:/opt/tickvpn-agent

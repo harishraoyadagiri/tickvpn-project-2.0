@@ -79,7 +79,7 @@ cp .env.example .env          # point DATABASE_URL at tickvpn_app
 npm install
 npm run prisma:generate
 npm run prisma:migrate
-npm run seed
+SEED_LOCAL_NODES=true npm run seed   # see the note below
 npm run dev                   # API on :3001
 
 # 3. frontend, second terminal
@@ -92,6 +92,13 @@ npm run dev                   # web on :3000
 Open <http://localhost:3000> and sign in with any email. No mail is sent in
 `console` mode — the sign-in token is printed in the API terminal and
 pre-filled in the form.
+
+> **`SEED_LOCAL_NODES=true` is what makes the seeded nodes selectable.** Without
+> it they are registered `OFFLINE`, because a node with no droplet behind it
+> would otherwise hand out a WireGuard config naming a public key no machine
+> holds — one that downloads cleanly, scans cleanly, and never connects. Locally
+> there is no droplet and that is fine; in production, a region becomes
+> selectable when you seed it with a real `NODE_IP_*` and `NODE_PUBKEY_*`.
 
 > **The role step is not optional.** The app deliberately does not connect as a
 > superuser: the ledger is append-only because the database refuses `UPDATE`
@@ -133,6 +140,9 @@ blocked on.
   Start here.
 - **[`docs/ROADMAP.md`](docs/ROADMAP.md)** — the same work grouped into phases,
   with the reasoning behind the ordering and the ranked risks.
+- **[`docs/RUNBOOK-first-node.md`](docs/RUNBOOK-first-node.md)** — droplet to
+  first billed minute, with the four checks that catch a tunnel which looks
+  right and carries nothing.
 
 This is pre-launch software. It has never taken a real payment or carried a
 real customer's traffic. Do not point strangers at it yet.

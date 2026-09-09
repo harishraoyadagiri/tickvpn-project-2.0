@@ -16,6 +16,7 @@
   "include": [
     "src/**/*.ts",
     "prisma/**/*.ts",
+    "scripts/**/*.ts",
     "tests/**/*.ts"
   ]
 }

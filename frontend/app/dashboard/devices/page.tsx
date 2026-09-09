@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { api, ApiError, type Device, type ProvisionResult, type Region } from "@/lib/api";
 import { buildConfigFile, derivePublicKey, generateKeyPair, getPrivateKey, storePrivateKey } from "@/lib/wireguard";
 import { formatDateTime } from "@/lib/format";
+import { ConfigQR } from "@/components/ConfigQR";
 
 const MAX_DEVICES = 3;
 
@@ -144,6 +145,7 @@ export default function DevicesPage() {
             your browser and is saved only in this browser&apos;s local storage. Import this into
             a WireGuard client to actually connect.
           </div>
+          <ConfigQR text={lastConfig.text} />
           <div className="config-box">{lastConfig.text}</div>
           <div style={{ display: "flex", gap: 10 }}>
             <button className="btn btn-outline btn-sm" onClick={() => navigator.clipboard.writeText(lastConfig.text)}>

@@ -10,6 +10,7 @@
     "prisma:migrate": "prisma migrate deploy",
     "prisma:migrate:dev": "prisma migrate dev",
     "seed": "ts-node prisma/seed.ts",
+    "node:token": "ts-node scripts/node-token.ts",
     "test": "ts-node tests/regressions.ts",
     "typecheck": "tsc --noEmit",
     "test:keys": "ts-node tests/keycheck.ts",

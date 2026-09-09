@@ -40,8 +40,13 @@ export function checkoutRouter(prisma: PrismaClient) {
             quantity: 1,
           },
         ],
-        success_url: `${env.APP_URL}/dashboard?purchase=pending`,
-        cancel_url: `${env.APP_URL}/pricing?purchase=cancelled`,
+        // Return to the page they left, carrying the purchase id so the UI can
+        // poll GET /purchases/:id rather than guessing from the balance.
+        //
+        // The old cancel_url pointed at /pricing, which is not a route this app
+        // has — backing out of a payment landed on a 404.
+        success_url: `${env.APP_URL}/dashboard/billing?purchase=success&id=${purchase.id}`,
+        cancel_url: `${env.APP_URL}/dashboard/billing?purchase=cancelled`,
         client_reference_id: purchase.id,
         metadata: { purchaseId: purchase.id, userId: req.userId as string, productId },
       });

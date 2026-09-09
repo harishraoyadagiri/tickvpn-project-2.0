@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, ApiError, type LedgerEntry, type PricingModel, type Product } from "@/lib/api";
+import { api, ApiError, type LedgerEntry, type PricingModel, type Product, type Purchase } from "@/lib/api";
 import { formatDateTime, formatPrice, humanDuration } from "@/lib/format";
 
 export default function BillingPage() {
@@ -11,6 +11,7 @@ export default function BillingPage() {
   const [msg, setMsg] = useState<{ text: string; error?: boolean } | null>(null);
   const [customMinutes, setCustomMinutes] = useState("");
   const [customEstimate, setCustomEstimate] = useState<string | null>(null);
+  const [ret, setRet] = useState<ReturnState>({ kind: "none" });
 
   useEffect(() => {
     api.get<Product[]>("/products").then(setProducts).catch(() => setProducts([]));
@@ -18,6 +19,68 @@ export default function BillingPage() {
       .get<LedgerEntry[]>("/wallet/transactions")
       .then(setLedger)
       .catch(() => setLedger([]));
+  }, []);
+
+  /**
+   * Coming back from Stripe.
+   *
+   * Stripe redirects the moment the customer pays, but the minutes arrive
+   * separately over the webhook — normally within a second, occasionally not.
+   * Nothing here used to wait for that, so a successful payment looked exactly
+   * like a failed one until the customer thought to refresh. During a payment,
+   * "nothing happened" reads as "my money is gone".
+   *
+   * Read the query string from window.location rather than useSearchParams:
+   * that hook opts the page out of static prerendering, and this is the only
+   * place in the app that needs it.
+   */
+  useEffect(() => {
+    let stop = false;
+
+    async function resolveReturn() {
+      const params = new URLSearchParams(window.location.search);
+      const outcome = params.get("purchase");
+      if (!outcome) return;
+
+      // Clear it so a refresh doesn't replay the banner.
+      window.history.replaceState({}, "", window.location.pathname);
+
+      if (outcome === "cancelled") {
+        setRet({ kind: "cancelled" });
+        return;
+      }
+
+      const id = params.get("id");
+      if (outcome !== "success" || !id) return;
+      setRet({ kind: "crediting" });
+
+      // ~20s of polling. Beyond that the honest answer is "not yet", not a
+      // spinner that never resolves.
+      for (let attempt = 0; attempt < 14 && !stop; attempt++) {
+        try {
+          const purchase = await api.get<Purchase>(`/purchases/${id}`);
+          if (stop) return;
+          if (purchase.status === "PAID") {
+            setRet({ kind: "credited", purchase });
+            api.get<LedgerEntry[]>("/wallet/transactions").then(setLedger).catch(() => {});
+            return;
+          }
+          if (purchase.status === "FAILED" || purchase.status === "REFUNDED") {
+            setRet({ kind: "failed", purchase });
+            return;
+          }
+        } catch {
+          // A transient error mid-poll is not a failed purchase. Keep trying.
+        }
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+      if (!stop) setRet({ kind: "slow" });
+    }
+
+    void resolveReturn();
+    return () => {
+      stop = true;
+    };
   }, []);
 
   const customMinutesValid = Number.isInteger(Number(customMinutes)) && Number(customMinutes) >= 1;
@@ -63,6 +126,41 @@ export default function BillingPage() {
           <div className="sub">Buy a Tick Pass and review your full ledger.</div>
         </div>
       </div>
+
+      {ret.kind !== "none" && (
+        <div className={`purchase-banner ${bannerTone(ret.kind)}`} role="status" aria-live="polite">
+          <div className="pb-body">
+            {ret.kind === "crediting" && (
+              <>
+                <span className="spinner" />
+                <span>Payment received. Adding the minutes to your wallet&hellip;</span>
+              </>
+            )}
+            {ret.kind === "credited" && (
+              <span>
+                <strong>{ret.purchase.minutes} minutes added.</strong> {ret.purchase.productName} is in
+                your wallet and your ledger below.
+              </span>
+            )}
+            {ret.kind === "slow" && (
+              <span>
+                Stripe has your payment, but the credit hasn&rsquo;t landed yet. It arrives over a
+                webhook and is normally instant &mdash; give it a moment and refresh. Nothing is lost.
+              </span>
+            )}
+            {ret.kind === "failed" && (
+              <span>
+                That payment ended as <strong>{ret.purchase.status.toLowerCase()}</strong>. No minutes
+                were added.
+              </span>
+            )}
+            {ret.kind === "cancelled" && <span>Checkout cancelled &mdash; you weren&rsquo;t charged.</span>}
+          </div>
+          <button className="pb-dismiss" onClick={() => setRet({ kind: "none" })} aria-label="Dismiss">
+            &times;
+          </button>
+        </div>
+      )}
 
       <div className="card">
         <div className="card-head">
@@ -136,6 +234,20 @@ export default function BillingPage() {
       </div>
     </div>
   );
+}
+
+type ReturnState =
+  | { kind: "none" }
+  | { kind: "cancelled" }
+  | { kind: "crediting" }
+  | { kind: "slow" }
+  | { kind: "credited"; purchase: Purchase }
+  | { kind: "failed"; purchase: Purchase };
+
+function bannerTone(kind: ReturnState["kind"]): string {
+  if (kind === "credited") return "ok";
+  if (kind === "failed") return "bad";
+  return "neutral";
 }
 
 function describeType(type: string): string {

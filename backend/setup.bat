@@ -88,6 +88,8 @@ rem Migrations create new tables, which the role has no rights on until granted.
 docker exec -e PGPASSWORD=postgres %DB_CONTAINER% psql -U postgres -d %DB_NAME% -q -v ON_ERROR_STOP=1 -v app_password=%APP_PASSWORD% -v DBNAME=%DB_NAME% -f /tmp/app_role.sql
 
 echo [7/7] Seeding products, regions and nodes...
+rem No droplet exists locally, so mark the seeded stand-in nodes usable.
+set SEED_LOCAL_NODES=true
 call npm run seed
 if %errorlevel% neq 0 ( echo [ERROR] Seed failed. & pause & exit /b 1 )
 

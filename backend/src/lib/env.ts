@@ -77,7 +77,6 @@ export const env = {
   enableDevRoutes: devRoutesRequested && !isProduction,
 
   /** Real WireGuard nodes vs. the in-process mock adapter. */
-  useRealNodes: optional("USE_REAL_NODES", "false") === "true",
 
   /** Stripe is optional until underwriting is done; required once in production. */
   STRIPE_SECRET_KEY: isProduction ? required("STRIPE_SECRET_KEY") : optional("STRIPE_SECRET_KEY", ""),
@@ -211,7 +210,6 @@ export function configSummary() {
     NODE_ENV: env.NODE_ENV,
     port: env.PORT,
     devRoutes: env.enableDevRoutes ? "ENABLED" : "disabled",
-    nodes: env.useRealNodes ? "real" : "mock",
     stripe: env.STRIPE_SECRET_KEY ? "configured" : "not configured",
     appUrl: env.APP_URL,
     corsOrigins: env.corsAllowedOrigins.join(", "),

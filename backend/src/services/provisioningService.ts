@@ -21,7 +21,23 @@ import { computeAllowedPeers } from "./authorizationService";
 const RECONCILE_WINDOW_SECONDS = 15;
 
 
-/** Least-loaded HEALTHY node in the region that still has capacity. */
+/**
+ * Least-loaded HEALTHY node in the region that still has capacity — and that
+ * could actually carry traffic.
+ *
+ * That last clause is not pedantry. The seed registers one node per region with
+ * `placeholder-<code>` as its public key, so the catalogue is complete before
+ * any droplet exists. A device provisioned against one of those gets a
+ * perfectly well-formed .conf naming a public key WireGuard will never
+ * handshake with: the download works, the QR scans, the tunnel silently never
+ * comes up, and nothing anywhere reports an error. During a staged rollout —
+ * one real droplet, two placeholders — that is exactly the trap a tester falls
+ * into by picking the wrong region from the menu.
+ *
+ * A node whose public key is not a real Curve25519 key cannot serve anyone, so
+ * it is not a candidate. Picking a region that has no real node yet now fails
+ * loudly with no_capacity, which is true and actionable.
+ */
 export async function selectHealthyNode(prisma: PrismaClient, regionCode: string) {
   const region = await prisma.region.findUnique({ where: { code: regionCode } });
   if (!region || !region.active) throw badRequest("region_unavailable", `Region ${regionCode} not available`);
@@ -32,6 +48,7 @@ export async function selectHealthyNode(prisma: PrismaClient, regionCode: string
   });
 
   const withRoom = candidates
+    .filter((n) => isValidWireGuardKey(n.publicKey))
     .filter((n) => n._count.devices < n.capacity)
     .sort((a, b) => a._count.devices - b._count.devices);
 

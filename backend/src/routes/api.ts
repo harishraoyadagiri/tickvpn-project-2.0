@@ -9,7 +9,7 @@ import {
   cookieOptions,
   AuthedRequest,
 } from "../lib/auth";
-import { asyncRoute, badRequest, HttpError } from "../lib/errors";
+import { asyncRoute, badRequest, notFound, HttpError } from "../lib/errors";
 import { env } from "../lib/env";
 import { getBalances, getLedger } from "../services/walletService";
 import { provisionDevice, revokeDevice } from "../services/provisioningService";
@@ -123,6 +123,39 @@ export function apiRouter(prisma: PrismaClient) {
         orderBy: { sortOrder: "asc" },
       });
       return res.json(regions);
+    })
+  );
+
+  /**
+   * One purchase, for the caller only.
+   *
+   * Stripe returns the customer to us the instant they pay, but entitlement
+   * arrives separately over the webhook — usually within a second, occasionally
+   * not. Without somewhere to ask, the dashboard can only show a stale balance
+   * and hope the customer refreshes, which during a payment reads as "my money
+   * disappeared". This is what the return page polls.
+   *
+   * Scoped by userId, not just by id: an unscoped lookup here would let anyone
+   * with a purchase id read someone else's spending.
+   */
+  router.get(
+    "/purchases/:id",
+    auth,
+    asyncRoute(async (req: AuthedRequest, res) => {
+      const purchase = await prisma.purchase.findFirst({
+        where: { id: req.params.id, userId: req.userId as string },
+        include: { product: { select: { name: true, durationMinutes: true } } },
+      });
+      if (!purchase) throw notFound("purchase_not_found");
+
+      return res.json({
+        id: purchase.id,
+        status: purchase.status,
+        amountCents: purchase.amountCents,
+        productName: purchase.product.name,
+        minutes: purchase.product.durationMinutes,
+        createdAt: purchase.createdAt,
+      });
     })
   );
 

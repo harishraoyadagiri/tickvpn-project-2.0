@@ -238,7 +238,6 @@ variable must never mean "allow". Set these on App Platform:
 | `EMAIL_FROM` | `TickVPN <noreply@yourdomain.com>` | Must be the domain verified in step 2 |
 | `RESEND_API_KEY` | from step 2 | |
 | `EMAIL_ALLOWLIST` | **empty** | Leave it set and real customers get no mail |
-| `USE_REAL_NODES` | `false` until step 10 lands, then `true` | |
 
 Then:
 
@@ -289,6 +288,10 @@ peers and nothing else.
 
 ## Step 11 — Bring up the first node — *you*
 
+> Step-by-step, with the verification checks and a symptom table:
+> **[`RUNBOOK-first-node.md`](RUNBOOK-first-node.md)**. The summary below is the
+> shape; the runbook is what to actually type.
+
 ```bash
 cd infra/terraform && terraform apply
 
@@ -297,7 +300,10 @@ cd infra/terraform && terraform apply
 ssh root@<droplet> wg show wg0 public-key
 
 # 2. mint its agent token — shown ONCE, stored only as a SHA-256 hash
-curl -X POST https://api.yourdomain.com/dev/nodes/<node-id>/token
+#    Run this wherever DATABASE_URL is available; there is deliberately no
+#    production HTTP route that mints node credentials.
+npm --prefix backend run node:token -- --list       # find the node
+npm --prefix backend run node:token -- us-node-1    # mint it
 
 # 3. install the agent
 scp -r backend/node-agent root@<droplet>:/opt/tickvpn-agent
@@ -315,7 +321,9 @@ TICKVPN_NODE_TOKEN=<the token> \
 - [ ] Let the balance run out and confirm the tunnel **actually stops** —
       within one reconcile pass (~15s), the peer disappears from `wg show wg0`
 
-Then set `USE_REAL_NODES=true` on the API and redeploy.
+There is no flag to flip afterwards. A node becomes real the moment it is
+registered with a genuine IP and public key and its agent starts reporting —
+the control plane does not have a mock mode to leave.
 
 ## Step 12 — Scale to three regions — *code, minutes*
 
